@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500" width="500" height="500">
+    <defs>
+      <linearGradient id="bgGrad_spanish-summer" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="#EA580C"/>
+        <stop offset="50%" stop-color="#C2410C"/>
+        <stop offset="100%" stop-color="#7C2D12"/>
+      </linearGradient>
+      <radialGradient id="glowGrad_spanish-summer" cx="50%" cy="50%" r="50%">
+        <stop offset="0%" stop-color="#FDBA74" stop-opacity="0.4"/>
+        <stop offset="100%" stop-color="#EA580C" stop-opacity="0"/>
+      </radialGradient>
+      <filter id="blur_spanish-summer">
+        <feGaussianBlur stdDeviation="30"/>
+      </filter>
+    </defs>
+    <rect width="500" height="500" fill="url(#bgGrad_spanish-summer)"/>
+    <circle cx="250" cy="200" r="160" fill="url(#glowGrad_spanish-summer)"/>
+    <circle cx="120" cy="380" r="100" fill="#FDBA74" opacity="0.2" filter="url(#blur_spanish-summer)"/>
+    <circle cx="380" cy="120" r="120" fill="#EA580C" opacity="0.35" filter="url(#blur_spanish-summer)"/>
+    
+    <!-- Abstract vinyl grooves -->
+    <circle cx="250" cy="230" r="190" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="1.5"/>
+    <circle cx="250" cy="230" r="150" fill="none" stroke="rgba(255,255,255,0.09)" stroke-width="1.5"/>
+    <circle cx="250" cy="230" r="110" fill="none" stroke="rgba(255,255,255,0.12)" stroke-width="1.5"/>
+    <circle cx="250" cy="230" r="70" fill="none" stroke="rgba(255,255,255,0.15)" stroke-width="1.5"/>
+    
+    <!-- Center Core Badge -->
+    <circle cx="250" cy="230" r="35" fill="rgba(10,12,18,0.85)" stroke="#FDBA74" stroke-width="2.5"/>
+    <circle cx="250" cy="230" r="8" fill="#FDBA74"/>
+    
+    <!-- Glass Title Card -->
+    <rect x="25" y="380" width="450" height="95" rx="16" fill="rgba(7, 10, 15, 0.75)" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
+    <text x="50" y="422" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="24" font-weight="800" fill="#FFFFFF">Spanish Summer</text>
+    <text x="50" y="452" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="15" font-weight="600" fill="#FDBA74">Jason Shaw</text>
+    <text x="445" y="440" text-anchor="end" font-family="monospace" font-size="12" font-weight="700" fill="rgba(255,255,255,0.6)">AURA CC</text>
+  </svg>
