@@ -1,2065 +1,1467 @@
 /**
- * AuraStream Main Application Controller
- * Spotify-layout edition: Sidebar Library | Main Content | Right Panel
+ * AuraStream application controller.
+ * Layout: top bar | library sidebar | main view | detail panel, with a persistent player bar.
+ * All clicks go through one delegated handler keyed on data-nav / data-action / data-panel / data-filter.
  */
 
 import './index.css';
-import { createIcons, icons } from 'lucide';
-import confetti from 'canvas-confetti';
 import { CATALOG, ARTIST_DATA } from './data/catalog.js';
 import { DEFAULT_PLAYLISTS } from './data/playlists.js';
 import { StorageService } from './services/storageService.js';
 import { RecommendationEngine } from './services/recommendationEngine.js';
-import { AudioService } from './services/audioService.js';
+import { AudioService, EQ_PRESETS, EQ_BANDS } from './services/audioService.js';
 import { AudioVisualizer } from './components/visualizer.js';
-import { SpotifyAuth, SpotifyAPI } from './services/spotify.js';
-import { SpotifyPlayerService } from './services/spotifyPlayerService.js';
+import { icon, hydrateIcons } from './icons.js';
 
-window.lucide = {
-  createIcons: (opts = {}) => createIcons({ icons, ...opts }),
-  icons
-};
+const TRACKS = new Map(CATALOG.map(t => [t.id, t]));
+const ARTISTS = Object.keys(ARTIST_DATA);
+const LIKED_COLOR = '#5038a0';
+
+const esc = (s = '') => String(s).replace(/[&<>"']/g, c => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+));
+
+function formatTime(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+  return `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
+}
+
+function formatTotal(seconds) {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.round((seconds % 3600) / 60);
+  return h ? `${h} hr ${m} min` : `${m} min`;
+}
+
+const tracksFor = ids => ids.map(id => TRACKS.get(id)).filter(Boolean);
+const artistTracks = name => CATALOG.filter(t => t.artist === name);
+const dialMode = v => (v <= 30 ? 'Comfort' : v <= 70 ? 'Blend' : 'Explore');
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+function greeting() {
+  const h = new Date().getHours();
+  return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
+}
 
 class AuraStreamApp {
   constructor() {
-    this.catalog = CATALOG;
-    this.spotifyPlayer = new AudioService(this.catalog);
-
-    this.currentView = 'home';
-    this.activeCategory = 'All';
-    this.selectedPlaylistId = null;
+    this.player = new AudioService(CATALOG);
+    this.view = null;
+    this.history = [];
+    this.future = [];
     this.searchQuery = '';
-    this.activePanelTab = null; // 'queue' | 'nowplaying' | 'lyrics' | 'eq'
-    this.discoveryDial = StorageService.getDiscoveryDial();
-    this.followedArtists = new Set(['Broke For Free']);
-    this._navHistory = [];
-    this._navFuture = [];
+    this.panelTab = window.innerWidth >= 1280 ? 'nowplaying' : null;
+    this.libraryFilter = 'all';
+    this.contextId = null;  // where the current queue came from, e.g. 'playlist:playlist-chill'
+    this.lists = {};        // contextId -> tracks rendered in the current view (row clicks resolve here)
+    this.dial = StorageService.getDiscoveryDial();
+    this.theaterOpen = false;
+    this.menuItems = [];
+    this.menuAnchor = null;
+    this.pendingTrackIds = [];
 
-    // User-Centric State
-    this.homeMode = StorageService.getHomeMode(); // 'my-music' | 'discover' (defaults to 'my-music')
-    this.focusMode = StorageService.getFocusMode(); // 'music' | 'all' (Music only focus mode)
-    this.contentType = 'music';
-    this.pinnedSections = new Set(['section-my-quick']);
-    this.activeExplainTrack = null;
+    this.stage = document.getElementById('stage-content');
+    this.main = document.getElementById('main-content');
+    this.rightPanel = document.getElementById('right-panel');
+    this.drawer = document.getElementById('right-drawer');
+    this.sidebarList = document.getElementById('sidebar-library-list');
+    this.theater = document.getElementById('fullscreen-theater');
+    this.omnibox = document.getElementById('omnibox-search');
+    this.menu = document.getElementById('context-menu');
 
-    // DOM refs
-    this.stageContent   = document.getElementById('stage-content');
-    this.rightPanel     = document.getElementById('right-panel');
-    this.rightDrawer    = document.getElementById('right-drawer');
-    this.omnibox        = document.getElementById('omnibox-search');
-    this.dialSlider     = document.getElementById('discovery-dial-slider');
-    this.dialLabel      = document.getElementById('dial-mode-label');
-    this.theaterEl      = document.getElementById('fullscreen-theater');
-    this.sidebarList    = document.getElementById('sidebar-library-list');
-    this.mainContent    = document.getElementById('main-content');
+    hydrateIcons();
 
-    // Mini visualizer
-    const miniCanvas = document.getElementById('mini-visualizer');
-    if (miniCanvas) {
-      this.visualizer = new AudioVisualizer(miniCanvas, this.spotifyPlayer);
-      this.visualizer.start();
-      miniCanvas.addEventListener('click', () => {
-        const mode = this.visualizer.cycleMode();
-        this.showToast(`Visualizer: ${mode.toUpperCase()}`);
-      });
-    }
-
-    this.spotifyPlayer = new SpotifyPlayerService();
-
-    this.init();
-  }
-
-  async init() {
-    // Spotify Auth Check
-    const urlParams = new URLSearchParams(window.location.search);
-    if (urlParams.has('code')) {
-      const success = await SpotifyAuth.handleCallback();
-      if (success) {
-        window.location.href = '/';
-        return;
-      }
-    }
-
-    const token = await SpotifyAuth.getAccessToken();
-    if (!token) {
-      const overlay = document.getElementById('spotify-auth-overlay');
-      overlay.style.display = 'flex';
-      
-      const clientIdInput = document.getElementById('spotify-client-id-input');
-      clientIdInput.value = SpotifyAuth.getClientId() !== 'YOUR_SPOTIFY_CLIENT_ID' ? SpotifyAuth.getClientId() : '';
-      
-      const urlDisplay = document.getElementById('current-url-display');
-      if (urlDisplay) urlDisplay.textContent = window.location.origin + '/';
-
-      document.getElementById('btn-spotify-login').addEventListener('click', () => {
-        if (!clientIdInput.value.trim()) {
-          alert('Please enter your Client ID');
-          return;
-        }
-        SpotifyAuth.setClientId(clientIdInput.value.trim());
-        // Since we are overriding the hardcoded string
-        SpotifyAuth.login();
-      });
-      return; // Stop initialization until logged in
-    }
-
-    // Initialize Spotify SDK
-    await this.spotifyPlayer.init();
-    
-    // Load initial user data
-    try {
-      this.userProfile = await SpotifyAPI.getUserProfile();
-      this.userPlaylists = await SpotifyAPI.getUserPlaylists();
-      
-      const avatarBtn = document.getElementById('btn-user-avatar');
-      if (avatarBtn && this.userProfile) {
-        avatarBtn.textContent = this.userProfile.display_name?.charAt(0) || 'U';
-        if (this.userProfile.images && this.userProfile.images.length > 0) {
-          avatarBtn.innerHTML = `<img src="${this.userProfile.images[0].url}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">`;
-        }
-      }
-    } catch (e) {
-      console.error('Error fetching user data', e);
-    }
-
-    this._bindGlobalEvents();
-    this._bindPlayerBar();
-    this._bindExplainModal();
-    this._bindCustomizeSectionsModal();
-    this._updateFocusModeUI();
-    this._renderSidebarLibrary();
-    this._updateDiscoveryDialUI();
-    this.navigate('home', null, true);
-
-    if (this.catalog.length > 0) {
-      this.spotifyPlayer.queue = [...this.catalog];
-      this.spotifyPlayer.queueIndex = 0;
-      this.spotifyPlayer.currentTrack = this.catalog[0];
-      this._updatePlayerBar(this.catalog[0]);
-      this._updateAuraGlow(this.catalog[0]);
-    }
-
-    this.activePanelTab = 'queue';
-    this._renderPanel('queue');
-    this._updatePanelTabUI();
-
-    // Sticky nav scroll listener
-    if (this.mainContent) {
-      this.mainContent.addEventListener('scroll', () => {
-        const nav = document.getElementById('content-sticky-nav');
-        if (nav) nav.classList.toggle('scrolled', this.mainContent.scrollTop > 60);
-      });
-    }
-
-    createIcons({ icons });
-  }
-
-  /* ── Aura Glow ─────────────────────────────────────────────────────────── */
-  _updateAuraGlow(track) {
-    if (!track) return;
-    const root = document.documentElement;
-    root.style.setProperty('--aura-primary', track.color || '#7928CA');
-    root.style.setProperty('--aura-accent',  track.accentColor || '#00F2FE');
-    root.style.setProperty('--aura-glow',    `${track.color || '#7928CA'}40`);
-  }
-
-  /* ── Player Bar Updates ─────────────────────────────────────────────────── */
-  _updatePlayerBar(track) {
-    if (!track) return;
-    const thumb  = document.getElementById('player-thumb');
-    const title  = document.getElementById('player-track-title');
-    const artist = document.getElementById('player-track-artist');
-    const likeBtn = document.getElementById('player-like-btn');
-
-    if (thumb)  { thumb.src = track.coverUrl; thumb.alt = track.title; }
-    if (title)  title.textContent = track.title;
-    if (artist) artist.textContent = track.artist;
-
-    const likedIds = StorageService.getLikedTrackIds();
-    if (likeBtn) {
-      const liked = likedIds.has(track.id);
-      likeBtn.classList.toggle('liked', liked);
-      likeBtn.querySelector('svg path') &&
-        likeBtn.querySelector('svg').setAttribute('fill', liked ? 'currentColor' : 'none');
-    }
-    this._updateAuraGlow(track);
-
-    // update right panel if open
-    if (this.activePanelTab === 'nowplaying') this._renderPanelNowPlaying();
-    if (this.activePanelTab === 'lyrics')     this._renderPanelLyrics();
-    if (this.activePanelTab === 'queue')      this._renderPanelQueue();
-  }
-
-  /* ── Player Bar Event Bindings ──────────────────────────────────────────── */
-  _bindPlayerBar() {
-    // Track change
-    this.spotifyPlayer.on('trackchange', ({ track }) => {
-      this._updatePlayerBar(track);
-      this._highlightActiveRow();
-      this._renderSidebarLibrary(); // update now-playing dot
+    const canvas = document.getElementById('mini-visualizer');
+    this.visualizer = new AudioVisualizer(canvas, this.player);
+    this.visualizer.start();
+    canvas.addEventListener('click', () => {
+      const mode = this.visualizer.cycleMode();
+      this.toast(`Visualizer: ${{ bars: 'Spectrum', waveform: 'Waveform', nebula: 'Pulse' }[mode]}`);
     });
 
-    // Play/Pause state
-    this.spotifyPlayer.on('playstate', ({ isPlaying }) => {
-      const playIcon  = document.getElementById('icon-play');
-      const pauseIcon = document.getElementById('icon-pause');
-      if (playIcon)  playIcon.style.display  = isPlaying ? 'none' : 'block';
-      if (pauseIcon) pauseIcon.style.display = isPlaying ? 'block' : 'none';
-      this._highlightActiveRow();
-    });
+    this.actions = this._createActions();
+    this._bindPlayer();
+    this._bindControls();
+    this._bindGlobal();
+    this._bindMediaSession();
+    this._updateDialUI();
+    this._updateModeButtons();
+    this._updateVolumeUI();
 
-    // Play / Pause button
-    document.getElementById('btn-play-pause')?.addEventListener('click', () =>
-      this.spotifyPlayer.togglePlayPause()
-    );
+    // Restore the last played song (paused) so the player bar is never empty
+    const last = TRACKS.get(StorageService.getHistory()[0]?.trackId) || CATALOG[0];
+    this.player.load(last, CATALOG);
 
-    // Prev / Next
-    document.getElementById('btn-prev')?.addEventListener('click', () => this.spotifyPlayer.playPrev());
-    document.getElementById('btn-next')?.addEventListener('click', () => this.spotifyPlayer.playNext());
+    this.navigate('home');
+    this._renderPanel();
+  }
 
-    // Shuffle with mode badge & transparent popover
-    const shuffleBtn     = document.getElementById('btn-shuffle');
-    const shuffleBadge   = document.getElementById('shuffle-badge');
-    const shufflePopover = document.getElementById('shuffle-popover');
-    const shuffleWidget  = document.getElementById('shuffle-widget');
+  /* ── Data helpers ─────────────────────────────────────────────────────── */
 
-    const updateShuffleUI = (mode) => {
-      if (!shuffleBtn || !shuffleBadge) return;
-      shuffleBtn.classList.toggle('active', mode !== 'off');
-      shuffleWidget?.classList.remove('mode-true-random', 'mode-smart-flow');
+  _allPlaylists() {
+    return [...StorageService.getCustomPlaylists(), ...DEFAULT_PLAYLISTS];
+  }
 
-      let badgeText = 'OFF';
-      if (mode === 'true-random') {
-        badgeText = 'RANDOM';
-        shuffleWidget?.classList.add('mode-true-random');
-      } else if (mode === 'smart-flow') {
-        badgeText = 'SMART';
-        shuffleWidget?.classList.add('mode-smart-flow');
+  _getPlaylist(id) {
+    return this._allPlaylists().find(p => p.id === id);
+  }
+
+  _likedTracks() {
+    return tracksFor([...StorageService.getLikedTrackIds()].reverse());
+  }
+
+  _likedPlaylist() {
+    const trackIds = [...StorageService.getLikedTrackIds()];
+    return { id: 'liked', title: 'Liked Songs', trackIds, color: LIKED_COLOR };
+  }
+
+  _contextTracks(ctx) {
+    if (this.lists[ctx]) return this.lists[ctx];
+    if (ctx === 'liked') return this._likedTracks();
+    if (ctx.startsWith('playlist:')) return tracksFor(this._getPlaylist(ctx.slice(9))?.trackIds || []);
+    if (ctx.startsWith('artist:')) return artistTracks(ctx.slice(7));
+    return [];
+  }
+
+  /* ── Playback entry points ────────────────────────────────────────────── */
+
+  playList(tracks, index, contextId) {
+    if (!tracks[index]) return;
+    this.contextId = contextId;
+    this.player.playTrack(tracks[index], tracks);
+  }
+
+  toggleContext(ctx) {
+    if (this.contextId === ctx && this.player.currentTrack) return this.player.togglePlayPause();
+    const tracks = this._contextTracks(ctx);
+    if (!tracks.length) return this.toast('Nothing to play here yet');
+    const start = this.player.shuffleMode === 'true-random' ? Math.floor(Math.random() * tracks.length) : 0;
+    this.playList(tracks, start, ctx);
+  }
+
+  /* ── Delegated actions ────────────────────────────────────────────────── */
+
+  _createActions() {
+    const p = this.player;
+    return {
+      'play-row': el => {
+        const tracks = this.lists[el.dataset.list] || [];
+        const track = tracks[Number(el.dataset.index)];
+        // Clicking the song that is already playing from this list pauses/resumes instead of restarting
+        if (track && track.id === p.currentTrack?.id && this.contextId === el.dataset.list) return p.togglePlayPause();
+        this.playList(tracks, Number(el.dataset.index), el.dataset.list);
+      },
+      'play-context': el => this.toggleContext(el.dataset.context),
+      'like': el => this.toggleLike(el.dataset.trackId),
+      'more': el => this.openTrackMenu(el, el.dataset.trackId, el.dataset.playlistId),
+      'playlist-more': el => this.openPlaylistMenu(el, el.dataset.id),
+      'menu-item': el => {
+        const item = this.menuItems[Number(el.dataset.index)];
+        this._closeMenu();
+        item?.run();
+      },
+      'explain': el => this.openExplain(el.dataset.trackId, el.dataset.seedId),
+      'follow': el => this.toggleFollow(el.dataset.artist),
+      'create-playlist': () => this.openCreatePlaylist(),
+      'browse': el => this.setSearch(el.dataset.query),
+      'seek-lyric': el => p.seekTo(Number(el.dataset.time)),
+      'toggle-play': () => p.togglePlayPause(),
+      'next': () => p.playNext(),
+      'prev': () => p.playPrev(),
+      'close-theater': () => this.closeTheater(),
+      'queue-play': el => p.playFromQueue(Number(el.dataset.index)),
+      'queue-up': el => p.reorderQueue(Number(el.dataset.index), Number(el.dataset.index) - 1),
+      'queue-down': el => p.reorderQueue(Number(el.dataset.index), Number(el.dataset.index) + 1),
+      'queue-remove': el => {
+        const i = Number(el.dataset.index);
+        const track = p.queue[i];
+        p.removeFromQueue(i);
+        this.toast(`Removed "${track.title}" from queue`, { undo: () => p.insertIntoQueue(i, track) });
+      },
+      'clear-queue': () => {
+        const saved = [...p.queue];
+        const savedIdx = p.queueIndex;
+        p.clearUpcoming();
+        this.toast('Queue cleared', { undo: () => p.setQueue(saved, savedIdx) });
+      },
+      'save-queue': () => {
+        const date = new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+        const pl = StorageService.createPlaylist(`Queue · ${date}`, 'Saved from your queue', p.queue.map(t => t.id));
+        this._renderSidebar();
+        this.toast(`Saved queue as "${pl.title}"`);
+      },
+      'eq-preset': el => {
+        p.setEqPreset(el.dataset.preset);
+        this._renderPanel();
+      },
+      'speed': el => {
+        p.setPlaybackSpeed(Number(el.dataset.speed));
+        this._renderPanel();
       }
-      shuffleBadge.textContent = badgeText;
-
-      // Update active option in popover
-      shufflePopover?.querySelectorAll('.shuffle-option').forEach(opt => {
-        const isOpt = opt.dataset.shuffleMode === mode;
-        opt.classList.toggle('active', isOpt);
-        const tag = opt.querySelector('.shuffle-opt-tag');
-        if (tag) {
-          if (isOpt) {
-            tag.textContent = 'Active';
-          } else {
-            if (opt.dataset.shuffleMode === 'true-random') tag.textContent = 'Unbiased';
-            else if (opt.dataset.shuffleMode === 'smart-flow') tag.textContent = 'AI Harmony';
-            else tag.textContent = 'Default';
-          }
-        }
-      });
     };
-
-    // Click on shuffle button cycles mode
-    shuffleBtn?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const mode = this.spotifyPlayer.cycleShuffleMode();
-      updateShuffleUI(mode);
-      const msgs = {
-        'true-random': 'Shuffle: True Random (Fisher-Yates pure randomization, zero repeats)',
-        'smart-flow': 'Shuffle: Smart Flow (Harmonic key & tempo energy flow)',
-        'off': 'Shuffle: Off (Sequential)'
-      };
-      this.showToast(msgs[mode] || 'Shuffle toggled');
-    });
-
-    // Click on badge opens/closes popover
-    shuffleBadge?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      shufflePopover?.classList.toggle('active');
-    });
-
-    // Selecting option inside popover
-    shufflePopover?.querySelectorAll('.shuffle-option').forEach(opt => {
-      opt.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const mode = opt.dataset.shuffleMode;
-        this.spotifyPlayer.setShuffleMode(mode);
-        updateShuffleUI(mode);
-        shufflePopover.classList.remove('active');
-        const msgs = {
-          'true-random': 'Shuffle Mode: True Random (Pure Fisher-Yates, zero repeats)',
-          'smart-flow': 'Shuffle Mode: Smart Flow (AI harmonic valence & BPM matching)',
-          'off': 'Shuffle Mode: Off (Playing sequentially)'
-        };
-        this.showToast(msgs[mode]);
-      });
-    });
-
-    // Close popover when clicking anywhere else
-    document.addEventListener('click', (e) => {
-      if (!e.target.closest('#shuffle-widget')) {
-        shufflePopover?.classList.remove('active');
-      }
-    });
-
-    this.spotifyPlayer.on('modechange', ({ shuffleMode }) => {
-      updateShuffleUI(shuffleMode);
-    });
-
-    // Repeat
-    const repeatBtn = document.getElementById('btn-repeat');
-    repeatBtn?.addEventListener('click', () => {
-      const mode = this.spotifyPlayer.cycleLoopMode();
-      repeatBtn.classList.toggle('active', mode !== 'off');
-      this.showToast(`Repeat: ${mode}`);
-    });
-
-    // Time update → scrubber
-    this.spotifyPlayer.on('timeupdate', ({ currentTime, duration }) => {
-      const cur   = document.getElementById('scrub-current');
-      const fill  = document.getElementById('scrub-fill');
-      const thumb = document.getElementById('scrub-thumb');
-      const total = document.getElementById('scrub-total');
-      if (cur)   cur.textContent   = this._formatTime(currentTime);
-      if (total) total.textContent = this._formatTime(duration || this.spotifyPlayer.currentTrack?.duration || 0);
-      if (duration > 0 && fill) {
-        const pct = (currentTime / duration) * 100;
-        fill.style.width = `${pct}%`;
-        if (thumb) thumb.style.left = `${pct}%`;
-      }
-      // lyrics sync
-      if (this.activePanelTab === 'lyrics') this._syncLyricsHighlight(currentTime);
-    });
-
-    // Scrubber click
-    const scrubWrap = document.getElementById('scrub-wrapper');
-    if (scrubWrap) {
-      let dragging = false;
-      const seek = (e) => {
-        const rect = scrubWrap.getBoundingClientRect();
-        const pct  = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-        const dur  = this.spotifyPlayer.audio?.duration || this.spotifyPlayer.currentTrack?.duration || 0;
-        this.spotifyPlayer.seekTo(pct * dur);
-      };
-      scrubWrap.addEventListener('click', seek);
-      scrubWrap.addEventListener('mousedown', () => { dragging = true; });
-      document.addEventListener('mousemove', (e) => { if (dragging) seek(e); });
-      document.addEventListener('mouseup',   () => { dragging = false; });
-    }
-
-    // Volume
-    const volSlider = document.getElementById('volume-slider');
-    if (volSlider) {
-      volSlider.value = (this.spotifyPlayer.volume || 0.8) * 100;
-      volSlider.addEventListener('input', (e) => {
-        const val = parseFloat(e.target.value) / 100;
-        this.spotifyPlayer.setVolume(val);
-        this._updateVolumeIcon(val);
-      });
-    }
-
-    // Mute
-    document.getElementById('btn-mute')?.addEventListener('click', () => {
-      const muted = this.spotifyPlayer.toggleMute();
-      this._updateVolumeIcon(muted ? 0 : this.spotifyPlayer.volume);
-    });
-
-    // Like from player
-    document.getElementById('player-like-btn')?.addEventListener('click', () => {
-      if (!this.spotifyPlayer.currentTrack) return;
-      const liked = StorageService.toggleLike(this.spotifyPlayer.currentTrack.id);
-      this._updatePlayerBar(this.spotifyPlayer.currentTrack);
-      if (liked) {
-        confetti({ particleCount: 30, spread: 60, origin: { y: 0.9, x: 0.15 } });
-        this.showToast(`Added "${this.spotifyPlayer.currentTrack.title}" to Liked Songs`);
-      } else {
-        this.showToast('Removed from Liked Songs');
-      }
-    });
-
-    // Right panel tab buttons (player bar)
-    document.getElementById('btn-panel-queue')?.addEventListener('click',   () => this._togglePanel('queue'));
-    document.getElementById('btn-panel-lyrics')?.addEventListener('click',  () => this._togglePanel('lyrics'));
-    document.getElementById('btn-panel-eq')?.addEventListener('click',      () => this._togglePanel('eq'));
-
-    // Theater
-    document.getElementById('btn-theater')?.addEventListener('click', () => this._openTheater());
-
-    // Thumb click → open now playing
-    document.getElementById('player-thumb-wrap')?.addEventListener('click', () => this._togglePanel('nowplaying'));
-
-    // Panel tabs (inside right panel)
-    document.querySelectorAll('.panel-tab').forEach(tab => {
-      tab.addEventListener('click', () => this._togglePanel(tab.dataset.panel));
-    });
-
-    // Close panel
-    document.getElementById('btn-right-panel-close')?.addEventListener('click', () => {
-      this.activePanelTab = null;
-      this.rightPanel?.classList.add('hidden');
-      this._updatePanelTabUI();
-    });
   }
 
-  /* ── Volume Icon ─────────────────────────────────────────────────────────── */
-  _updateVolumeIcon(vol) {
-    const icon   = document.getElementById('icon-volume');
-    const muted  = document.getElementById('icon-mute');
-    if (!icon || !muted) return;
-    icon.style.display  = vol === 0 ? 'none' : 'block';
-    muted.style.display = vol === 0 ? 'block' : 'none';
-  }
-
-  /* ── Discovery Dial ─────────────────────────────────────────────────────── */
-  _updateDiscoveryDialUI() {
-    if (!this.dialSlider || !this.dialLabel) return;
-    this.dialSlider.value = this.discoveryDial;
-    let label = 'BLEND';
-    if      (this.discoveryDial <= 30) label = 'COMFORT';
-    else if (this.discoveryDial <= 70) label = 'BLEND';
-    else                                label = 'EXPLORE';
-    this.dialLabel.textContent = label;
-  }
-
-  /* ── Right Panel ─────────────────────────────────────────────────────────── */
-  _togglePanel(tabName) {
-    if (this.activePanelTab === tabName) {
-      this.activePanelTab = null;
-      this.rightPanel?.classList.add('hidden');
+  _onClick(e) {
+    if (!this.menu.hidden && !e.target.closest('#context-menu')) {
+      this._lastMenuAnchor = this.menuAnchor;
+      this._closeMenu();
     } else {
-      this.activePanelTab = tabName;
-      this.rightPanel?.classList.remove('hidden');
-      this._renderPanel(tabName);
+      this._lastMenuAnchor = null;
     }
-    this._updatePanelTabUI();
-  }
 
-  _updatePanelTabUI() {
-    document.querySelectorAll('.panel-tab').forEach(tab => {
-      tab.classList.toggle('active', tab.dataset.panel === this.activePanelTab);
-    });
-    const extraBtns = {
-      queue:      'btn-panel-queue',
-      lyrics:     'btn-panel-lyrics',
-      eq:         'btn-panel-eq',
-      nowplaying: 'btn-panel-queue',
-    };
-    ['btn-panel-queue','btn-panel-lyrics','btn-panel-eq'].forEach(id => {
-      document.getElementById(id)?.classList.remove('active');
-    });
-    if (this.activePanelTab && extraBtns[this.activePanelTab]) {
-      document.getElementById(extraBtns[this.activePanelTab])?.classList.add('active');
+    // closest() with a combined selector returns the innermost interactive element,
+    // so a like button inside a clickable row wins over the row itself.
+    const el = e.target.closest('[data-nav],[data-action],[data-panel],[data-filter]');
+    if (!el) return;
+    if (el.dataset.nav) return this.navigate(el.dataset.nav, el.dataset.id ?? null);
+    if (el.dataset.panel) {
+      return el.classList.contains('panel-tab') ? this.showPanel(el.dataset.panel) : this.togglePanel(el.dataset.panel);
     }
-  }
-
-  _renderPanel(tabName) {
-    switch (tabName) {
-      case 'queue':      this._renderPanelQueue();      break;
-      case 'nowplaying': this._renderPanelNowPlaying(); break;
-      case 'lyrics':     this._renderPanelLyrics();     break;
-      case 'eq':         this._renderPanelEQ();         break;
-    }
-  }
-
-  /* ── Queue Panel ─────────────────────────────────────────────────────────── */
-  _renderPanelQueue() {
-    if (!this.rightDrawer) return;
-    const queue = this.spotifyPlayer.queue || [];
-    const idx   = this.spotifyPlayer.queueIndex || 0;
-    const cur   = this.spotifyPlayer.currentTrack;
-    const upcoming = queue.slice(idx + 1);
-
-    const totalSeconds = upcoming.reduce((acc, t) => acc + (t.duration || 0), 0);
-    const mins = Math.floor(totalSeconds / 60);
-
-    this.rightDrawer.innerHTML = `
-      ${cur ? `
-        <p class="queue-section-label">Now playing</p>
-        <div class="queue-track-item active-queue">
-          <img class="queue-thumb" src="${cur.coverUrl}" alt="${cur.title}" />
-          <div class="queue-info">
-            <div class="queue-title" style="color:var(--brand-green)">${cur.title}</div>
-            <div class="queue-artist">${cur.artist}</div>
-          </div>
-          <span class="queue-duration">${this._formatTime(cur.duration)}</span>
-        </div>
-      ` : ''}
-
-      <div class="queue-header-actions" style="margin-top:18px">
-        <div>
-          <span class="queue-section-label" style="margin:0">Next up</span>
-          <span class="queue-summary-text" style="display:block;margin-top:2px">${upcoming.length} track${upcoming.length !== 1 ? 's' : ''} • ${mins} min</span>
-        </div>
-        ${upcoming.length > 0 ? `
-          <button class="btn-clear-queue" id="btn-clear-upcoming" title="Clear all upcoming tracks from queue">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
-            Clear upcoming
-          </button>
-        ` : ''}
-      </div>
-
-      ${upcoming.map((t, uIdx) => {
-        const absoluteIdx = idx + 1 + uIdx;
-        return `
-          <div class="queue-track-item" data-queue-track="${t.id}" data-queue-idx="${absoluteIdx}">
-            <img class="queue-thumb" src="${t.coverUrl}" alt="${t.title}" />
-            <div class="queue-info">
-              <div class="queue-title">${t.title}</div>
-              <div class="queue-artist">${t.artist}</div>
-            </div>
-            <div class="queue-item-actions">
-              ${uIdx > 0 ? `<button class="queue-action-btn" data-action="move-up" data-idx="${absoluteIdx}" title="Move up">▲</button>` : ''}
-              ${uIdx < upcoming.length - 1 ? `<button class="queue-action-btn" data-action="move-down" data-idx="${absoluteIdx}" title="Move down">▼</button>` : ''}
-              <button class="queue-action-btn" data-action="remove-item" data-idx="${absoluteIdx}" data-id="${t.id}" title="Remove from queue">✕</button>
-            </div>
-            <span class="queue-duration" style="margin-left:6px">${this._formatTime(t.duration)}</span>
-          </div>
-        `;
-      }).join('')}
-
-      ${upcoming.length === 0 ? `
-        <div class="empty-state">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/></svg>
-          <p>No upcoming tracks. Queue songs from Home or Playlists!</p>
-        </div>
-      ` : ''}
-    `;
-
-    // Click item to play
-    this.rightDrawer.querySelectorAll('[data-queue-track]').forEach(item => {
-      item.addEventListener('click', (e) => {
-        if (e.target.closest('.queue-item-actions')) return;
-        const t = this.catalog.find(tr => tr.id === item.dataset.queueTrack);
-        if (t) this.spotifyPlayer.playTrack(t, queue);
-      });
-    });
-
-    // Clear upcoming button with Undo
-    document.getElementById('btn-clear-upcoming')?.addEventListener('click', () => {
-      const savedQueue = [...this.spotifyPlayer.queue];
-      const savedIdx   = this.spotifyPlayer.queueIndex;
-      this.spotifyPlayer.clearQueue();
-      this._renderPanelQueue();
-      this.showToast('Upcoming queue cleared', {
-        undoAction: () => {
-          this.spotifyPlayer.queue = savedQueue;
-          this.spotifyPlayer.queueIndex = savedIdx;
-          this._renderPanelQueue();
-          this.showToast('Queue restored');
-        }
-      });
-    });
-
-    // Move up
-    this.rightDrawer.querySelectorAll('[data-action="move-up"]').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const fromIdx = parseInt(btn.dataset.idx, 10);
-        this.spotifyPlayer.reorderQueue(fromIdx, fromIdx - 1);
-        this._renderPanelQueue();
-      });
-    });
-
-    // Move down
-    this.rightDrawer.querySelectorAll('[data-action="move-down"]').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const fromIdx = parseInt(btn.dataset.idx, 10);
-        this.spotifyPlayer.reorderQueue(fromIdx, fromIdx + 1);
-        this._renderPanelQueue();
-      });
-    });
-
-    // Remove single track with Undo
-    this.rightDrawer.querySelectorAll('[data-action="remove-item"]').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const remIdx = parseInt(btn.dataset.idx, 10);
-        const removedTrack = this.spotifyPlayer.queue[remIdx];
-        if (removedTrack) {
-          this.spotifyPlayer.removeFromQueue(remIdx);
-          this._renderPanelQueue();
-          this.showToast(`Removed "${removedTrack.title}" from queue`, {
-            undoAction: () => {
-              this.spotifyPlayer.queue.splice(remIdx, 0, removedTrack);
-              this._renderPanelQueue();
-              this.showToast(`Restored "${removedTrack.title}" to queue`);
-            }
-          });
-        }
-      });
-    });
-  }
-
-  /* ── Now Playing Panel ───────────────────────────────────────────────────── */
-  _renderPanelNowPlaying() {
-    if (!this.rightDrawer) return;
-    const t = this.spotifyPlayer.currentTrack;
-    if (!t) {
-      this.rightDrawer.innerHTML = `<div class="empty-state"><p>Nothing playing yet.</p></div>`;
+    if (el.dataset.filter) {
+      this.libraryFilter = el.dataset.filter;
+      document.querySelectorAll('[data-filter]').forEach(c => c.classList.toggle('active', c.dataset.filter === this.libraryFilter));
+      this._renderSidebar();
+      if (this.view?.name === 'library') this.renderView();
       return;
     }
-    const liked = StorageService.getLikedTrackIds().has(t.id);
-    const artistInfo = (ARTIST_DATA && ARTIST_DATA[t.artist]) || {
-      photo: '/artists/broke-for-free.jpg',
-      listeners: '1,200,000 monthly listeners',
-      bio: `${t.artist} is an independent musician creating open-source audio under Creative Commons.`
-    };
-    const isFollowing = this.followedArtists.has(t.artist);
-
-    const queue = this.spotifyPlayer.queue || [];
-    const qIdx  = this.spotifyPlayer.queueIndex || 0;
-    const nextTrack = queue[qIdx + 1];
-
-    this.rightDrawer.innerHTML = `
-      <!-- Now Playing Main Card -->
-      <div class="now-playing-card">
-        <img class="now-playing-art" src="${t.coverUrl}" alt="${t.title}" />
-        <div class="now-playing-meta">
-          <div class="now-playing-text">
-            <div class="now-playing-title">${t.title}</div>
-            <div class="now-playing-artist">${t.artist}</div>
-          </div>
-          <button class="player-like-btn ${liked ? 'liked' : ''}" id="panel-like-btn" aria-label="Like song">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="${liked ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
-          </button>
-        </div>
-      </div>
-
-      <!-- Quick Actions / Badges -->
-      <div style="padding:4px 0 12px; display:flex; gap:8px; flex-wrap:wrap;">
-        <span class="tag-badge">${t.genre}</span>
-        <span class="tag-badge">${t.mood}</span>
-        <span class="tag-badge">${t.bpm} BPM</span>
-        <span class="tag-badge">${t.license || 'CC-BY'}</span>
-      </div>
-
-      <!-- About the Artist (Spotify Desktop Style) -->
-      <div class="artist-profile-card">
-        <div class="artist-banner-wrap">
-          <img class="artist-banner-img" src="${artistInfo.photo}" alt="${t.artist}" />
-          <div class="artist-banner-overlay"></div>
-          <span class="artist-banner-label">About the artist</span>
-        </div>
-        <div class="artist-profile-info">
-          <div class="artist-profile-name-row">
-            <div class="artist-profile-name">
-              ${t.artist}
-              <span class="artist-verified-badge" title="Verified Creator">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
-              </span>
-            </div>
-            <button class="artist-follow-btn ${isFollowing ? 'following' : ''}" id="btn-artist-follow">
-              ${isFollowing ? 'Following' : 'Follow'}
-            </button>
-          </div>
-          <div class="artist-profile-listeners">${artistInfo.listeners}</div>
-          <p class="artist-profile-bio">${artistInfo.bio}</p>
-        </div>
-      </div>
-
-      <!-- Next in Queue Preview -->
-      ${nextTrack ? `
-        <div class="now-playing-credits" style="cursor:pointer" id="btn-next-in-queue">
-          <div class="credits-title-row">
-            <span class="credits-title">Next in queue</span>
-            <span style="font-size:12px;font-weight:700;color:var(--brand-green)">Open queue →</span>
-          </div>
-          <div style="display:flex;align-items:center;gap:12px">
-            <img src="${nextTrack.coverUrl}" alt="${nextTrack.title}" style="width:48px;height:48px;border-radius:var(--r-xs);object-fit:cover" />
-            <div style="flex:1;min-width:0">
-              <div style="font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${nextTrack.title}</div>
-              <div style="font-size:12px;color:var(--text-muted)">${nextTrack.artist}</div>
-            </div>
-            <span style="font-size:12px;color:var(--text-muted)">${this._formatTime(nextTrack.duration)}</span>
-          </div>
-        </div>
-      ` : ''}
-
-      <!-- Credits Card (Spotify Style) -->
-      <div class="now-playing-credits">
-        <div class="credits-title-row">
-          <span class="credits-title">Credits</span>
-        </div>
-        <div class="credit-row">
-          <div class="credit-role">Main Performer</div>
-          <div class="credit-name">${t.artist}</div>
-        </div>
-        <div class="credit-row">
-          <div class="credit-role">Album / Release</div>
-          <div class="credit-name">${t.album || t.title}</div>
-        </div>
-        <div class="credit-row">
-          <div class="credit-role">Licensing Source</div>
-          <div class="credit-name">${t.license || 'Free Music Archive (CC-BY 3.0)'}</div>
-        </div>
-      </div>
-    `;
-
-    document.getElementById('panel-like-btn')?.addEventListener('click', () => {
-      const nowLiked = StorageService.toggleLike(t.id);
-      this._updatePlayerBar(t);
-      this._renderPanelNowPlaying();
-      this.showToast(nowLiked ? `Added to Liked Songs` : `Removed from Liked Songs`);
-    });
-
-    document.getElementById('btn-artist-follow')?.addEventListener('click', () => {
-      if (this.followedArtists.has(t.artist)) {
-        this.followedArtists.delete(t.artist);
-        this.showToast(`Unfollowed ${t.artist}`);
-      } else {
-        this.followedArtists.add(t.artist);
-        confetti({ particleCount: 25, spread: 50 });
-        this.showToast(`Following ${t.artist}`);
-      }
-      this._renderPanelNowPlaying();
-    });
-
-    document.getElementById('btn-next-in-queue')?.addEventListener('click', () => {
-      this._togglePanel('queue');
-    });
+    if (el === this._lastMenuAnchor) return; // second click on the same ••• closes its menu
+    this.actions[el.dataset.action]?.(el, e);
   }
 
-  /* ── Lyrics Panel ─────────────────────────────────────────────────────────── */
-  _renderPanelLyrics() {
-    if (!this.rightDrawer) return;
-    const t = this.spotifyPlayer.currentTrack;
-    if (!t || !t.lyrics || t.lyrics.length === 0) {
-      this.rightDrawer.innerHTML = `
-        <div class="empty-state">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-          <p>No lyrics available for this track.</p>
-        </div>
-      `;
-      return;
-    }
+  /* ── Player wiring ────────────────────────────────────────────────────── */
 
-    this.rightDrawer.innerHTML = `
-      <div class="lyrics-panel-header">
-        <span class="lyrics-panel-label">Lyrics</span>
-        <span class="lyrics-synced-badge"><span class="lyrics-synced-dot"></span> SYNCED</span>
-      </div>
-      <div class="lyrics-scroll-area" id="lyrics-scroll-area">
-        ${t.lyrics.map((line, i) => `
-          <div class="lyric-line ${line.text === '♪' ? 'lyric-instrumental' : ''}"
-               data-ts="${line.time}"
-               data-lyric-idx="${i}"
-               id="lyric-line-${i}">
-            ${line.text}
-          </div>
-        `).join('')}
-      </div>
-    `;
+  _bindPlayer() {
+    const p = this.player;
 
-    // Click to seek
-    this.rightDrawer.querySelectorAll('.lyric-line').forEach(el => {
-      el.addEventListener('click', () => {
-        const ts = parseFloat(el.dataset.ts);
-        this.spotifyPlayer.seekTo(ts);
-      });
-    });
-  }
-
-  _syncLyricsHighlight(currentTime) {
-    const lines = document.querySelectorAll('.lyric-line[data-ts]');
-    if (!lines.length) return;
-    let activeIdx = -1;
-    lines.forEach((el, i) => {
-      const ts = parseFloat(el.dataset.ts);
-      if (currentTime >= ts) activeIdx = i;
-    });
-    lines.forEach((el, i) => {
-      el.classList.toggle('active', i === activeIdx);
-      el.classList.toggle('past',   i < activeIdx);
-    });
-    if (activeIdx >= 0 && lines[activeIdx]) {
-      lines[activeIdx].scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
-  }
-
-  /* ── EQ Panel ─────────────────────────────────────────────────────────────── */
-  _renderPanelEQ() {
-    if (!this.rightDrawer) return;
-    const bands = [
-      { label: 'Bass',    hz: '60Hz',   gain: 0 },
-      { label: 'Low-Mid', hz: '250Hz',  gain: 0 },
-      { label: 'Mid',     hz: '1kHz',   gain: 0 },
-      { label: 'Hi-Mid',  hz: '4kHz',   gain: 0 },
-      { label: 'Treble',  hz: '12kHz',  gain: 0 },
-    ];
-    const presets = ['Flat', 'Bass Boost', 'Pop', 'Rock', 'Jazz', 'Classical', 'Electronic'];
-    const speeds  = ['0.75×', '1×', '1.25×', '1.5×', '2×'];
-
-    this.rightDrawer.innerHTML = `
-      <div class="eq-panel">
-        <div>
-          <div class="eq-panel-title">Preset</div>
-          <div class="eq-preset-chips">
-            ${presets.map((p, i) => `<button class="eq-chip ${i===0?'active':''}" data-preset="${p}">${p}</button>`).join('')}
-          </div>
-        </div>
-
-        <div class="eq-sliders">
-          ${bands.map((b, i) => `
-            <div class="eq-slider-col">
-              <span class="eq-val" id="eq-val-${i}">0 dB</span>
-              <input class="eq-v-range" type="range" min="-12" max="12" value="0"
-                     data-band="${i}" orient="vertical" />
-              <span class="eq-band-label">${b.label}</span>
-              <span class="eq-band-hz">${b.hz}</span>
-            </div>
-          `).join('')}
-        </div>
-
-        <div class="eq-feature-row">
-          <div>
-            <div class="eq-feature-label">Spatial Width</div>
-            <div class="eq-feature-sub">3D stereo widening</div>
-          </div>
-          <label class="toggle-wrap">
-            <input type="checkbox" id="eq-toggle-spatial" />
-            <span class="toggle-track"></span>
-          </label>
-        </div>
-
-        <div class="eq-feature-row">
-          <div>
-            <div class="eq-feature-label">Bass Enhance</div>
-            <div class="eq-feature-sub">Sub-harmonic boost</div>
-          </div>
-          <label class="toggle-wrap">
-            <input type="checkbox" id="eq-toggle-bass" />
-            <span class="toggle-track"></span>
-          </label>
-        </div>
-
-        <div>
-          <div class="eq-panel-title" style="margin-bottom:8px">Playback Speed</div>
-          <div class="speed-row">
-            ${speeds.map((s, i) => `<button class="speed-chip ${i===1?'active':''}" data-speed="${s}">${s}</button>`).join('')}
-          </div>
-        </div>
-      </div>
-    `;
-
-    // EQ sliders
-    this.rightDrawer.querySelectorAll('.eq-v-range').forEach(input => {
-      input.addEventListener('input', () => {
-        const band = parseInt(input.dataset.band, 10);
-        const val  = parseFloat(input.value);
-        const label = document.getElementById(`eq-val-${band}`);
-        if (label) label.textContent = `${val > 0 ? '+' : ''}${val} dB`;
-        try { this.spotifyPlayer.setEQBand?.(band, val); } catch(e) {}
-      });
-    });
-
-    // Presets
-    this.rightDrawer.querySelectorAll('.eq-chip').forEach(btn => {
-      btn.addEventListener('click', () => {
-        this.rightDrawer.querySelectorAll('.eq-chip').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        this.showToast(`EQ Preset: ${btn.dataset.preset}`);
-      });
-    });
-
-    // Speed
-    this.rightDrawer.querySelectorAll('.speed-chip').forEach(btn => {
-      btn.addEventListener('click', () => {
-        this.rightDrawer.querySelectorAll('.speed-chip').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        const rate = parseFloat(btn.dataset.speed.replace('×',''));
-        if (this.spotifyPlayer.audio) this.spotifyPlayer.audio.playbackRate = rate;
-        this.showToast(`Speed: ${btn.dataset.speed}`);
-      });
-    });
-
-    // Spatial toggle
-    document.getElementById('eq-toggle-spatial')?.addEventListener('change', (e) => {
-      try { this.spotifyPlayer.setSpatialWidth?.(e.target.checked ? 0.6 : 0); } catch(_) {}
-      this.showToast(`Spatial Width: ${e.target.checked ? 'ON' : 'OFF'}`);
-    });
-  }
-
-  /* ── Theater Mode ─────────────────────────────────────────────────────────── */
-  _openTheater() {
-    const t = this.spotifyPlayer.currentTrack;
-    if (!t || !this.theaterEl) return;
-    const lyrics = t.lyrics || [];
-
-    this.theaterEl.innerHTML = `
-      <div class="theater-bg" style="
-        background: radial-gradient(ellipse 80% 60% at 30% 20%, ${t.color}30, transparent 55%),
-                    radial-gradient(ellipse 50% 40% at 75% 80%, ${t.accentColor}20, transparent 50%),
-                    #080A10;"></div>
-      <button class="theater-close" id="theater-close-btn">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-      </button>
-
-      <div class="theater-main">
-        <div class="vinyl-stage">
-          <div class="vinyl-disc-wrap">
-            <div class="vinyl-outer ${this.spotifyPlayer.isPlaying ? '' : 'paused'}" id="theater-vinyl">
-              <div class="vinyl-grooves"></div>
-            </div>
-            <img class="vinyl-art" src="${t.coverUrl}" alt="${t.title}" />
-          </div>
-          <div class="theater-meta">
-            <div class="theater-track-title">${t.title}</div>
-            <div class="theater-track-artist">${t.artist}</div>
-            <div class="theater-badges">
-              <span class="tag-badge">${t.genre}</span>
-              <span class="tag-badge">${t.bpm} BPM</span>
-            </div>
-          </div>
-        </div>
-        <div class="theater-lyrics-side">
-          <div class="theater-lyrics-label">Lyrics</div>
-          <div class="theater-lyrics-scroll" id="theater-lyrics-scroll">
-            ${lyrics.length > 0
-              ? lyrics.map((l, i) => `
-                  <div class="theater-lyric ${l.text === '♪' ? 'lyric-instrumental' : ''}"
-                       data-ts="${l.time}" data-idx="${i}" id="theater-lyric-${i}">
-                    ${l.text}
-                  </div>`).join('')
-              : '<div style="color:var(--text-muted);font-size:18px;font-weight:600">No lyrics for this track.</div>'
-            }
-          </div>
-        </div>
-      </div>
-
-      <div class="theater-controls">
-        <div class="theater-scrub-row">
-          <span class="theater-time" id="theater-cur">0:00</span>
-          <div class="theater-progress" id="theater-progress">
-            <div class="theater-progress-fill" id="theater-fill"></div>
-          </div>
-          <span class="theater-time" id="theater-dur">${this._formatTime(t.duration)}</span>
-        </div>
-        <div class="theater-btns-row">
-          <button class="theater-ctrl ${this.spotifyPlayer.shuffleMode !== 'off' ? 'active' : ''}" id="theater-shuffle">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="22" height="22"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
-          </button>
-          <button class="theater-ctrl" id="theater-prev">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="22" height="22"><path d="M6 6h2v12H6zm3.5 6L20 18V6z"/></svg>
-          </button>
-          <button class="theater-main-play" id="theater-play">
-            <svg id="theater-icon-play" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="28" height="28" ${this.spotifyPlayer.isPlaying ? 'style="display:none"' : ''}><path d="M8 5v14l11-7z"/></svg>
-            <svg id="theater-icon-pause" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="28" height="28" ${this.spotifyPlayer.isPlaying ? '' : 'style="display:none"'}><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-          </button>
-          <button class="theater-ctrl" id="theater-next">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="22" height="22"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
-          </button>
-          <button class="theater-ctrl" id="theater-close-btn2">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="22" height="22"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
-          </button>
-        </div>
-      </div>
-    `;
-
-    this.theaterEl.classList.add('active');
-
-    // Theater controls
-    const closeTheater = () => this.theaterEl.classList.remove('active');
-    document.getElementById('theater-close-btn')?.addEventListener('click', closeTheater);
-    document.getElementById('theater-close-btn2')?.addEventListener('click', closeTheater);
-    document.getElementById('theater-play')?.addEventListener('click', () => this.spotifyPlayer.togglePlayPause());
-    document.getElementById('theater-prev')?.addEventListener('click', () => this.spotifyPlayer.playPrev());
-    document.getElementById('theater-next')?.addEventListener('click', () => this.spotifyPlayer.playNext());
-
-    // Theater scrubber
-    document.getElementById('theater-progress')?.addEventListener('click', (e) => {
-      const rect = e.currentTarget.getBoundingClientRect();
-      const pct  = (e.clientX - rect.left) / rect.width;
-      const dur  = this.spotifyPlayer.audio?.duration || t.duration;
-      this.spotifyPlayer.seekTo(pct * dur);
-    });
-
-    // Theater time/lyric sync
-    const theaterTimeHandler = ({ currentTime, duration }) => {
-      const cur  = document.getElementById('theater-cur');
-      const fill = document.getElementById('theater-fill');
-      if (cur)  cur.textContent  = this._formatTime(currentTime);
-      if (fill && duration > 0) fill.style.width = `${(currentTime / duration) * 100}%`;
-
-      // sync lyrics
-      const lyricEls = this.theaterEl.querySelectorAll('.theater-lyric[data-ts]');
-      let activeIdx = -1;
-      lyricEls.forEach((el, i) => {
-        if (currentTime >= parseFloat(el.dataset.ts)) activeIdx = i;
-      });
-      lyricEls.forEach((el, i) => {
-        el.classList.toggle('active', i === activeIdx);
-        el.classList.toggle('past',   i < activeIdx);
-      });
-      if (activeIdx >= 0 && lyricEls[activeIdx]) {
-        lyricEls[activeIdx].scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }
-    };
-    this.spotifyPlayer.on('timeupdate', theaterTimeHandler);
-
-    // Play state sync in theater
-    this.spotifyPlayer.on('playstate', ({ isPlaying }) => {
-      const vinyl   = document.getElementById('theater-vinyl');
-      const playI   = document.getElementById('theater-icon-play');
-      const pauseI  = document.getElementById('theater-icon-pause');
-      if (vinyl)  vinyl.classList.toggle('paused', !isPlaying);
-      if (playI)  playI.style.display  = isPlaying ? 'none' : 'block';
-      if (pauseI) pauseI.style.display = isPlaying ? 'block' : 'none';
-    });
-
-    // Lyric click-to-seek
-    this.theaterEl.querySelectorAll('.theater-lyric[data-ts]').forEach(el => {
-      el.addEventListener('click', () => this.spotifyPlayer.seekTo(parseFloat(el.dataset.ts)));
-    });
-
-    // ESC to close
-    const escHandler = (e) => { if (e.key === 'Escape') { closeTheater(); document.removeEventListener('keydown', escHandler); } };
-    document.addEventListener('keydown', escHandler);
-  }
-
-  /* ── Sidebar Library ─────────────────────────────────────────────────────── */
-  _renderSidebarLibrary() {
-    if (!this.sidebarList) return;
-    const custom    = StorageService.getCustomPlaylists();
-    const allPls    = [...DEFAULT_PLAYLISTS, ...custom];
-    const currentId = this.spotifyPlayer.currentTrack?.id;
-    const likedIds  = StorageService.getLikedTrackIds();
-
-    this.sidebarList.innerHTML = `
-      <!-- Liked Songs item -->
-      <div class="library-item ${this.currentView === 'liked' ? 'active' : ''}" data-nav="liked">
-        <div class="library-item-thumb" style="background:linear-gradient(135deg,#7928CA,#4338CA);display:flex;align-items:center;justify-content:center">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" width="22" height="22"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
-        </div>
-        <div class="library-item-info">
-          <div class="library-item-name">Liked Songs</div>
-          <div class="library-item-meta">Playlist • ${likedIds.size} songs</div>
-        </div>
-      </div>
-
-      <!-- Playlists -->
-      ${allPls.map(pl => {
-        const isActive = this.currentView === 'playlist' && this.selectedPlaylistId === pl.id;
-        const tracksInPl = pl.trackIds?.map(id => this.catalog.find(t => t.id === id)).filter(Boolean) || [];
-        const isNowPlaying = tracksInPl.some(t => t.id === currentId);
-        return `
-          <div class="library-item ${isActive ? 'active' : ''}" data-nav="playlist" data-id="${pl.id}">
-            <img class="library-item-thumb" src="${pl.coverUrl}" alt="${pl.title}" />
-            <div class="library-item-info">
-              <div class="library-item-name">${pl.title}</div>
-              <div class="library-item-meta">Playlist • ${pl.trackIds?.length || 0} songs</div>
-            </div>
-            ${isNowPlaying ? '<div class="now-playing-dot"></div>' : ''}
-          </div>
-        `;
-      }).join('')}
-    `;
-
-    // Bind clicks
-    this.sidebarList.querySelectorAll('[data-nav]').forEach(item => {
-      item.addEventListener('click', () => {
-        const nav = item.dataset.nav;
-        const id  = item.dataset.id || null;
-        this.navigate(nav, id);
-      });
-    });
-  }
-
-  /* ── Global Events ────────────────────────────────────────────────────────── */
-  _bindGlobalEvents() {
-    // Discovery dial
-    this.dialSlider?.addEventListener('input', (e) => {
-      this.discoveryDial = parseInt(e.target.value, 10);
-      StorageService.saveDiscoveryDial(this.discoveryDial);
-      this._updateDiscoveryDialUI();
-      if (this.currentView === 'home') this.renderHome();
-    });
-
-    // Live search
-    this.omnibox?.addEventListener('input', (e) => {
-      this.searchQuery = e.target.value.trim();
-      if (this.searchQuery.length > 0) {
-        this.currentView = 'search';
-        this.renderSearchResults();
-      } else {
-        this.navigate('home', null, true);
-      }
-    });
-
-    // Back / Forward nav
-    document.getElementById('btn-nav-back')?.addEventListener('click', () => {
-      if (this._navHistory.length < 2) return;
-      this._navFuture.push(this._navHistory.pop());
-      const prev = this._navHistory[this._navHistory.length - 1];
-      this._navigateDirect(prev.view, prev.param);
-    });
-
-    document.getElementById('btn-nav-forward')?.addEventListener('click', () => {
-      if (!this._navFuture.length) return;
-      const next = this._navFuture.pop();
-      this.navigate(next.view, next.param, true);
-    });
-
-    // Create playlist modal
-    const modal       = document.getElementById('create-playlist-modal');
-    const openModal   = () => modal?.classList.add('active');
-    const closeModal  = () => modal?.classList.remove('active');
-
-    document.getElementById('btn-create-playlist')?.addEventListener('click', openModal);
-    document.getElementById('modal-close-btn')?.addEventListener('click',  closeModal);
-    document.getElementById('modal-cancel-btn')?.addEventListener('click', closeModal);
-
-    document.getElementById('modal-save-btn')?.addEventListener('click', () => {
-      const nameInput = document.getElementById('playlist-name-input');
-      const descInput = document.getElementById('playlist-desc-input');
-      const title = nameInput?.value.trim();
-      const desc  = descInput?.value.trim();
-      if (title) {
-        const newPl = StorageService.createPlaylist(title, desc);
-        closeModal();
-        if (nameInput) nameInput.value = '';
-        if (descInput) descInput.value = '';
-        this._renderSidebarLibrary();
-        this.showToast(`Playlist "${newPl.title}" created!`);
-        this.navigate('playlist', newPl.id);
-      }
-    });
-
-    // Focus mode toggle (Music Only)
-    document.getElementById('btn-focus-mode')?.addEventListener('click', () => {
-      this.focusMode = this.focusMode === 'music' ? 'all' : 'music';
-      StorageService.saveFocusMode(this.focusMode);
-      this._updateFocusModeUI();
-      if (this.currentView === 'home') this.renderHome();
-      this.showToast(this.focusMode === 'music' ? 'Focus Mode ON: Music Only (Podcasts & Audiobooks hidden)' : 'Focus Mode OFF: All media types enabled');
-    });
-
-    // Keyboard shortcuts
-    document.addEventListener('keydown', (e) => {
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-      if (e.key === ' ') { e.preventDefault(); this.spotifyPlayer.togglePlayPause(); }
-      if (e.key === 'ArrowRight' && e.altKey) this.spotifyPlayer.playNext();
-      if (e.key === 'ArrowLeft'  && e.altKey) this.spotifyPlayer.playPrev();
-    });
-  }
-
-  /* ── Focus Mode UI ─────────────────────────────────────────────────────────── */
-  _updateFocusModeUI() {
-    const btn = document.getElementById('btn-focus-mode');
-    if (!btn) return;
-    const isMusic = this.focusMode === 'music';
-    btn.classList.toggle('active', isMusic);
-    const label = btn.querySelector('.focus-mode-label');
-    if (label) label.textContent = isMusic ? 'Music Only' : 'All Media';
-  }
-
-  /* ── Explainability Modal (Why am I seeing this?) ──────────────────────────── */
-  _bindExplainModal() {
-    const modal = document.getElementById('explain-rec-modal');
-    const closeBtn = document.getElementById('explain-close-btn');
-    const notInterestedBtn = document.getElementById('explain-not-interested-btn');
-    const playBtn = document.getElementById('explain-play-btn');
-
-    closeBtn?.addEventListener('click', () => modal?.classList.remove('active'));
-    modal?.addEventListener('click', (e) => {
-      if (e.target === modal) modal.classList.remove('active');
-    });
-
-    playBtn?.addEventListener('click', () => {
-      if (this.activeExplainTrack) {
-        modal?.classList.remove('active');
-        this.spotifyPlayer.playTrack(this.activeExplainTrack, this.catalog);
-      }
-    });
-
-    notInterestedBtn?.addEventListener('click', () => {
-      if (this.activeExplainTrack) {
-        modal?.classList.remove('active');
-        const trackTitle = this.activeExplainTrack.title;
-        this.showToast(`Feedback noted: excluded "${trackTitle}" from recommendations`, {
-          undoAction: () => {
-            this.showToast(`Restored recommendation weighting for "${trackTitle}"`);
-          }
+    p.on('trackchange', ({ track }) => {
+      this._updatePlayerBar();
+      document.documentElement.style.setProperty('--aura', track.color || '#535353');
+      this._refreshPlayingState();
+      if (this.panelTab) this._renderPanel();
+      if (this.theaterOpen) this._renderTheater();
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: track.title,
+          artist: track.artist,
+          album: track.album || '',
+          artwork: [{ src: new URL(track.coverUrl, location.href).href, sizes: '512x512', type: 'image/jpeg' }]
         });
       }
     });
-  }
 
-  _openExplainModal(trackId) {
-    const modal = document.getElementById('explain-rec-modal');
-    const body  = document.getElementById('explain-body');
-    const track = this.catalog.find(t => t.id === trackId);
-    if (!modal || !body || !track) return;
-    this.activeExplainTrack = track;
-
-    const energyScore   = Math.round((track.vector?.energy || 0.7) * 100);
-    const valenceScore  = Math.round((track.vector?.valence || 0.65) * 100);
-    const curTrack      = this.spotifyPlayer.currentTrack || this.catalog[0];
-    const bpmDiff       = Math.abs((track.bpm || 115) - (curTrack.bpm || 115));
-    const dialMode      = this.discoveryDial <= 30 ? 'Comfort' : this.discoveryDial <= 70 ? 'Blend' : 'Explorer';
-
-    body.innerHTML = `
-      <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px;padding:12px;background:var(--bg-surface);border-radius:var(--r-md);border:1px solid var(--border-subtle)">
-        <img src="${track.coverUrl}" alt="${track.title}" onerror="this.onerror=null;this.src='/covers/night-owl.jpg'" style="width:52px;height:52px;border-radius:var(--r-xs);object-fit:cover" />
-        <div style="flex:1;min-width:0">
-          <div style="font-size:15px;font-weight:700">${track.title}</div>
-          <div style="font-size:13px;color:var(--text-muted)">${track.artist} • ${track.genre}</div>
-        </div>
-      </div>
-
-      <div style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin-bottom:14px">
-        <strong style="color:#fff">Recommendation logic:</strong> Matched via localized audio vector similarity with your listening history and "${curTrack.title}" (${curTrack.artist}).
-      </div>
-
-      <div class="explain-match-grid">
-        <div class="explain-match-card">
-          <div class="explain-match-label">Energy Resonance</div>
-          <div class="explain-match-value">${energyScore}%</div>
-          <div class="explain-bar-track"><div class="explain-bar-fill" style="width:${energyScore}%"></div></div>
-        </div>
-        <div class="explain-match-card">
-          <div class="explain-match-label">Mood / Valence Match</div>
-          <div class="explain-match-value">${valenceScore}%</div>
-          <div class="explain-bar-track"><div class="explain-bar-fill" style="width:${valenceScore}%"></div></div>
-        </div>
-        <div class="explain-match-card">
-          <div class="explain-match-label">BPM Proximity</div>
-          <div class="explain-match-value">±${bpmDiff} BPM (${track.bpm} BPM)</div>
-          <div class="explain-bar-track"><div class="explain-bar-fill" style="width:${Math.max(15, 100 - bpmDiff * 2)}%"></div></div>
-        </div>
-        <div class="explain-match-card">
-          <div class="explain-match-label">Discovery Dial Factor</div>
-          <div class="explain-match-value">${this.discoveryDial}% (${dialMode})</div>
-          <div class="explain-bar-track"><div class="explain-bar-fill" style="width:${this.discoveryDial}%"></div></div>
-        </div>
-      </div>
-
-      <p style="font-size:12px;color:var(--text-muted);line-height:1.4">
-        Zero surveillance or sponsored feed manipulation. Computed privately on your browser via Creative Commons open audio vectors.
-      </p>
-    `;
-
-    modal.classList.add('active');
-  }
-
-  /* ── Customize Sections Modal ────────────────────────────────────────────── */
-  _bindCustomizeSectionsModal() {
-    const modal = document.getElementById('customize-sections-modal');
-    const closeBtn = document.getElementById('sections-close-btn');
-    const saveBtn = document.getElementById('sections-save-btn');
-    const resetBtn = document.getElementById('sections-reset-btn');
-
-    closeBtn?.addEventListener('click', () => modal?.classList.remove('active'));
-    modal?.addEventListener('click', (e) => {
-      if (e.target === modal) modal.classList.remove('active');
+    p.on('playstate', ({ isPlaying }) => {
+      const btn = document.getElementById('btn-play-pause');
+      btn.innerHTML = icon(isPlaying ? 'pause' : 'play', 18);
+      btn.setAttribute('aria-label', isPlaying ? 'Pause' : 'Play');
+      const t = p.currentTrack;
+      document.title = isPlaying && t ? `${t.title} • ${t.artist}` : 'AuraStream';
+      const theaterBtn = this.theater.querySelector('[data-action="toggle-play"]');
+      if (theaterBtn) {
+        theaterBtn.innerHTML = icon(isPlaying ? 'pause' : 'play', 24);
+        theaterBtn.setAttribute('aria-label', isPlaying ? 'Pause' : 'Play');
+      }
+      this._refreshPlayingState();
     });
 
-    saveBtn?.addEventListener('click', () => {
-      modal?.classList.remove('active');
-      if (this.currentView === 'home') this.renderHome();
-      this.showToast('Home feed customized');
+    p.on('timeupdate', ({ currentTime, duration }) => {
+      this._updateProgress(currentTime, duration);
+      if (this.panelTab === 'lyrics') this._syncLyrics(this.drawer, currentTime);
+      if (this.theaterOpen) this._syncLyrics(this.theater.querySelector('.theater-lyrics'), currentTime);
     });
 
-    resetBtn?.addEventListener('click', () => {
-      StorageService.unhideAllSections();
-      StorageService.saveSectionOrder('my-music', null);
-      StorageService.saveSectionOrder('discover', null);
-      modal?.classList.remove('active');
-      if (this.currentView === 'home') this.renderHome();
-      this.showToast('Restored default section layout');
+    p.on('queuechange', () => {
+      if (this.panelTab === 'queue' || this.panelTab === 'nowplaying') this._renderPanel();
+    });
+
+    p.on('modechange', () => this._updateModeButtons());
+
+    p.on('error', ({ track }) => {
+      this.toast(`Couldn't play "${track?.title}". Skipping.`);
+      setTimeout(() => p.playNext(false), 1200);
     });
   }
 
-  _openCustomizeSectionsModal() {
-    const modal = document.getElementById('customize-sections-modal');
-    const list  = document.getElementById('sections-manage-list');
-    if (!modal || !list) return;
+  _bindControls() {
+    const p = this.player;
+    const on = (id, fn) => document.getElementById(id).addEventListener('click', fn);
 
-    const allSections = this.homeMode === 'my-music'
-      ? [
-          { id: 'section-my-quick',     name: 'Quick Access & Pinned Songs' },
-          { id: 'section-my-recent',    name: 'Recently Played Tracks' },
-          { id: 'section-my-playlists', name: 'Your Playlists & Mixes' },
-          { id: 'section-my-artists',   name: 'Your Followed Artists' }
-        ]
-      : [
-          { id: 'section-disc-recs',    name: 'AI Recommended For You' },
-          { id: 'section-disc-radar',   name: 'Discovery Radar (Sonic Explorer)' },
-          { id: 'section-disc-artists', name: 'Popular Artists Spotlight' },
-          { id: 'section-disc-moods',   name: 'Atmosphere & Mood Mixes' },
-          { id: 'section-disc-genres',  name: 'Explore All By Genre' }
-        ];
+    on('btn-play-pause', () => p.togglePlayPause());
+    on('btn-prev', () => p.playPrev());
+    on('btn-next', () => p.playNext());
+    on('btn-theater', () => this.openTheater());
+    on('player-thumb-wrap', () => this.togglePanel('nowplaying'));
+    on('btn-nav-back', () => this.back());
+    on('btn-nav-forward', () => this.forward());
+    on('btn-right-panel-close', () => this.togglePanel(null));
+    on('player-track-artist', e => this.navigate('artist', e.currentTarget.dataset.artist));
 
-    const currentOrder = StorageService.getSectionOrder(this.homeMode) || allSections.map(s => s.id);
-    const hiddenSet = StorageService.getHiddenSections();
-
-    // Sort allSections according to currentOrder
-    const sorted = [...allSections].sort((a, b) => {
-      const idxA = currentOrder.indexOf(a.id);
-      const idxB = currentOrder.indexOf(b.id);
-      return (idxA >= 0 ? idxA : 99) - (idxB >= 0 ? idxB : 99);
+    on('btn-shuffle', () => {
+      const mode = p.cycleShuffleMode();
+      this.toast({
+        'true-random': 'Shuffle on: true random',
+        'smart-flow': 'Smart Flow on: songs ordered by tempo and energy',
+        off: 'Shuffle off'
+      }[mode]);
     });
 
-    list.innerHTML = sorted.map((sec, idx) => {
-      const isHidden = hiddenSet.has(sec.id);
-      return `
-        <div class="section-manage-row ${isHidden ? 'hidden-section' : ''}" data-sec-id="${sec.id}">
-          <div class="section-manage-info">
-            <span style="font-size:16px;color:${isHidden ? 'var(--text-muted)' : 'var(--brand-green)'}">${isHidden ? '✕' : '✓'}</span>
-            <div>
-              <div class="section-manage-name">${sec.name}</div>
-              <div style="font-size:11px;color:var(--text-muted)">${isHidden ? 'Hidden from feed' : 'Visible on feed'}</div>
-            </div>
-          </div>
-          <div class="section-manage-actions">
-            ${idx > 0 ? `<button class="btn-section-ctrl" data-reorder="up" data-idx="${idx}" title="Move up">▲</button>` : ''}
-            ${idx < sorted.length - 1 ? `<button class="btn-section-ctrl" data-reorder="down" data-idx="${idx}" title="Move down">▼</button>` : ''}
-            <button class="btn-section-ctrl" data-toggle-hide="${sec.id}" style="font-size:12px;width:auto;padding:0 10px;border-radius:var(--r-pill)" title="${isHidden ? 'Show section' : 'Hide section'}">
-              ${isHidden ? 'Unhide' : 'Hide'}
-            </button>
-          </div>
-        </div>
-      `;
-    }).join('');
+    on('btn-repeat', () => {
+      const mode = p.cycleLoopMode();
+      this.toast({ all: 'Repeat all', one: 'Repeat one', off: 'Repeat off' }[mode]);
+    });
 
-    // Reorder handlers
-    list.querySelectorAll('[data-reorder]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const fromIdx = parseInt(btn.dataset.idx, 10);
-        const toIdx = btn.dataset.reorder === 'up' ? fromIdx - 1 : fromIdx + 1;
-        const newOrder = sorted.map(s => s.id);
-        const [moved] = newOrder.splice(fromIdx, 1);
-        newOrder.splice(toIdx, 0, moved);
-        StorageService.saveSectionOrder(this.homeMode, newOrder);
-        this._openCustomizeSectionsModal();
+    on('btn-mute', () => {
+      p.toggleMute();
+      this._updateVolumeUI();
+    });
+
+    const vol = document.getElementById('volume-slider');
+    vol.addEventListener('input', () => {
+      p.setVolume(Number(vol.value) / 100);
+      this._updateVolumeUI();
+    });
+
+    this._bindSeekRange(document.getElementById('scrub-range'), document.getElementById('scrub-current'));
+
+    const dial = document.getElementById('discovery-dial-slider');
+    dial.addEventListener('input', () => this.setDial(Number(dial.value)));
+  }
+
+  /** Native range input for seeking: preview while dragging, seek on release. */
+  _bindSeekRange(range, label) {
+    range.addEventListener('input', () => {
+      range.dataset.seeking = '1';
+      const dur = this._duration();
+      range.style.setProperty('--progress', `${range.value / 10}%`);
+      if (label) label.textContent = formatTime((range.value / 1000) * dur);
+    });
+    range.addEventListener('change', () => {
+      this.player.seekTo((range.value / 1000) * this._duration());
+      delete range.dataset.seeking;
+    });
+  }
+
+  _duration() {
+    return this.player.audio.duration || this.player.currentTrack?.duration || 0;
+  }
+
+  _bindGlobal() {
+    document.addEventListener('click', e => this._onClick(e));
+
+    // Hide broken artwork instead of showing the browser's broken-image glyph
+    document.addEventListener('error', e => {
+      if (e.target.tagName === 'IMG') e.target.classList.add('img-broken');
+    }, true);
+
+    this.omnibox.addEventListener('input', () => {
+      this.searchQuery = this.omnibox.value;
+      if (this.view?.name === 'search') this.renderView();
+      else this.navigate('search');
+    });
+
+    this.main.addEventListener('scroll', () => {
+      // Show the compact title bar once the big play button has scrolled out of view
+      const actions = this.stage.querySelector('.view-actions');
+      this.stage.querySelector('.sticky-bar')?.classList.toggle('show', !!actions && this.main.scrollTop > actions.offsetTop);
+      if (!this.menu.hidden) this._closeMenu();
+    }, { passive: true });
+
+    window.addEventListener('resize', () => this._closeMenu());
+
+    document.addEventListener('keydown', e => this._onKeydown(e));
+
+    document.addEventListener('fullscreenchange', () => {
+      if (!document.fullscreenElement && this.theaterOpen) this.closeTheater();
+    });
+
+    // Modals: overlay click and [data-close-modal] buttons close
+    document.querySelectorAll('.modal-overlay').forEach(overlay => {
+      overlay.addEventListener('click', e => {
+        if (e.target === overlay || e.target.closest('[data-close-modal]')) overlay.classList.remove('open');
       });
     });
 
-    // Toggle hide handlers
-    list.querySelectorAll('[data-toggle-hide]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const id = btn.dataset.toggleHide;
-        StorageService.toggleHideSection(id);
-        this._openCustomizeSectionsModal();
-      });
+    document.getElementById('create-playlist-form').addEventListener('submit', e => {
+      e.preventDefault();
+      const name = document.getElementById('playlist-name-input');
+      const desc = document.getElementById('playlist-desc-input');
+      const pl = StorageService.createPlaylist(name.value, desc.value, this.pendingTrackIds);
+      e.target.reset();
+      document.getElementById('create-playlist-modal').classList.remove('open');
+      this._renderSidebar();
+      this.toast(this.pendingTrackIds.length ? `Added to "${pl.title}"` : `Created "${pl.title}"`);
+      this.navigate('playlist', pl.id);
     });
 
-    modal.classList.add('active');
+    document.getElementById('explain-play-btn').addEventListener('click', () => {
+      document.getElementById('explain-rec-modal').classList.remove('open');
+      const track = TRACKS.get(this.explainTrackId);
+      if (!track) return;
+      const [ctx, list] = Object.entries(this.lists).find(([, ts]) => ts.includes(track)) || [`track:${track.id}`, [track]];
+      this.playList(list, list.indexOf(track), ctx);
+    });
+
+    // EQ sliders live in the re-rendered panel, so listen on the stable container
+    this.drawer.addEventListener('input', e => {
+      if (!e.target.matches('.eq-range')) return;
+      const band = Number(e.target.dataset.band);
+      const val = Number(e.target.value);
+      this.player.setEqBand(band, val);
+      e.target.closest('.eq-band').querySelector('.eq-val').textContent = `${val > 0 ? '+' : ''}${val} dB`;
+      this.drawer.querySelectorAll('[data-action="eq-preset"]').forEach(c => c.classList.remove('active'));
+    });
   }
 
-  /* ── Navigation ───────────────────────────────────────────────────────────── */
-  navigate(view, param = null, skipHistory = false) {
-    if (!skipHistory) {
-      this._navFuture = [];
+  _onKeydown(e) {
+    const t = e.target;
+    if (e.key === 'Escape') {
+      if (!this.menu.hidden) return this._closeMenu();
+      const modal = document.querySelector('.modal-overlay.open');
+      if (modal) return modal.classList.remove('open');
+      if (this.theaterOpen) return this.closeTheater();
+      if (t === this.omnibox) this.omnibox.blur();
+      return;
     }
-    this._navHistory.push({ view, param });
-    if (this._navHistory.length > 50) this._navHistory.shift();
-    this._navigateDirect(view, param);
-    this._updateNavArrows();
-  }
+    if (t.matches('input[type="text"], input[type="search"], textarea') || t.isContentEditable) return;
 
-  _navigateDirect(view, param) {
-    this.currentView        = view;
-    this.selectedPlaylistId = param;
-    this._renderSidebarLibrary();
-    this.renderCurrentView();
-  }
-
-  _updateNavArrows() {
-    const backBtn    = document.getElementById('btn-nav-back');
-    const forwardBtn = document.getElementById('btn-nav-forward');
-    if (backBtn)    backBtn.disabled    = this._navHistory.length < 2;
-    if (forwardBtn) forwardBtn.disabled = this._navFuture.length === 0;
-  }
-
-  /* ── View Routing ─────────────────────────────────────────────────────────── */
-  renderCurrentView() {
-    if (!this.stageContent) return;
-    switch (this.currentView) {
-      case 'home':     this.renderHome();     break;
-      case 'radar':    this.renderRadar();    break;
-      case 'library':  this.renderLibrary();  break;
-      case 'liked':    this.renderLiked();    break;
-      case 'playlist': this.renderPlaylist(this.selectedPlaylistId); break;
-      case 'search':   this.renderSearchResults(); break;
-      default:         this.renderHome();
+    if ((e.key === 'Enter' || e.key === ' ') && t.matches('[tabindex][data-action]')) {
+      e.preventDefault();
+      t.click();
+      return;
     }
-    this._highlightActiveRow();
+    if (e.key === '/' || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k')) {
+      e.preventDefault();
+      this.omnibox.focus();
+      return;
+    }
+    // Space toggles playback unless a button has focus (Space activates the focused button instead)
+    if (e.key === ' ' && !t.matches('button, a')) {
+      e.preventDefault();
+      this.player.togglePlayPause();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'ArrowRight') { e.preventDefault(); this.player.playNext(); }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'ArrowLeft')  { e.preventDefault(); this.player.playPrev(); }
   }
 
-  /* ── HOME ─────────────────────────────────────────────────────────────────── */
-  renderHome() {
-    this.stageContent.innerHTML = `
-      <!-- Gradient Hero Header -->
-      <div class="home-hero">
-        <div class="hero-bg" style="background-image: url('https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?auto=format&fit=crop&q=80&w=1200')"></div>
-        <div class="hero-content">
-          <div class="hero-tag">Welcome to AuraStream via Spotify</div>
-          <h1 class="hero-title">Your Personalized Music</h1>
-          <p class="hero-desc">Discover new sounds and enjoy your Spotify Premium playlists.</p>
-          <div class="hero-actions">
-            <button class="btn-play-large" id="btn-hero-play">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-            </button>
-            <button class="btn-secondary" id="btn-hero-explore">Browse Top Tracks</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="content-body">
-        <div class="section-block">
-          <div class="section-block-header">
-            <h2 class="section-block-title">Your Playlists</h2>
-          </div>
-          <div class="cards-row" id="spotify-playlists-grid">
-            <!-- Populated dynamically -->
-            <div style="padding:20px; color:var(--text-muted)">Loading playlists...</div>
-          </div>
-        </div>
-        
-        <div class="section-block">
-          <div class="section-block-header">
-            <h2 class="section-block-title">Recently Played</h2>
-          </div>
-          <div class="cards-row" id="spotify-recent-grid">
-            <!-- Populated dynamically -->
-            <div style="padding:20px; color:var(--text-muted)">Loading recent tracks...</div>
-          </div>
-        </div>
-      </div>
-    `;
-
-    // Fetch and render Spotify data
-    setTimeout(async () => {
-      try {
-        const playlists = await SpotifyAPI.getUserPlaylists();
-        const plGrid = document.getElementById('spotify-playlists-grid');
-        if (plGrid && playlists && playlists.items) {
-          plGrid.innerHTML = playlists.items.map(p => {
-            if (!p) return '';
-            const img = p.images && p.images.length > 0 ? p.images[0].url : '/covers/playlist-radar.svg';
-            return `
-              <div class="media-card" data-playlist-uri="${p.uri}">
-                <div class="card-art-wrapper">
-                  <img class="card-art-img" src="${img}" alt="${p.name}" loading="lazy" />
-                  <button class="card-play-btn"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button>
-                </div>
-                <div class="card-title">${p.name}</div>
-                <div class="card-subtitle">By ${p.owner?.display_name || 'Spotify'}</div>
-              </div>
-            `;
-          }).join('');
-          
-          plGrid.querySelectorAll('.media-card').forEach(card => {
-            card.addEventListener('click', () => {
-               this.spotifyPlayer.playContext(card.dataset.playlistUri);
-            });
-          });
-        }
-        
-        const recent = await SpotifyAPI.getRecentlyPlayed();
-        const recentGrid = document.getElementById('spotify-recent-grid');
-        if (recentGrid && recent && recent.items) {
-          // Keep unique tracks
-          const uniqueItems = [];
-          const seenIds = new Set();
-          for (const item of recent.items) {
-            if (item && item.track && !seenIds.has(item.track.id)) {
-               seenIds.add(item.track.id);
-               uniqueItems.push(item);
-            }
-          }
-          
-          recentGrid.innerHTML = uniqueItems.slice(0, 10).map(item => {
-            const t = item.track;
-            const img = t.album.images[0]?.url || '/covers/night-owl.jpg';
-            return `
-              <div class="media-card" data-track-uri="${t.uri}">
-                <div class="card-art-wrapper">
-                  <img class="card-art-img" src="${img}" alt="${t.name}" loading="lazy" />
-                  <button class="card-play-btn"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button>
-                </div>
-                <div class="card-title">${t.name}</div>
-                <div class="card-subtitle">${t.artists.map(a => a.name).join(', ')}</div>
-              </div>
-            `;
-          }).join('');
-          
-          recentGrid.querySelectorAll('.media-card').forEach(card => {
-            card.addEventListener('click', () => {
-               this.spotifyPlayer.play(card.dataset.trackUri);
-            });
-          });
-        }
-      } catch (err) {
-        console.error('Error loading Spotify home data:', err);
-      }
-    }, 100);
+  _bindMediaSession() {
+    if (!('mediaSession' in navigator)) return;
+    const p = this.player;
+    const handlers = {
+      play: () => p.togglePlayPause(),
+      pause: () => p.togglePlayPause(),
+      nexttrack: () => p.playNext(),
+      previoustrack: () => p.playPrev(),
+      seekto: d => p.seekTo(d.seekTime)
+    };
+    for (const [action, fn] of Object.entries(handlers)) {
+      try { navigator.mediaSession.setActionHandler(action, fn); } catch { /* unsupported action */ }
+    }
   }
 
-  /* ── RADAR ────────────────────────────────────────────────────────────────── */
-  renderRadar() {
-    const cur  = this.spotifyPlayer.currentTrack || this.catalog[0];
-    const recs = RecommendationEngine.getRecommendationsForTrack(cur, this.catalog, this.discoveryDial, 12);
+  /* ── Player bar ───────────────────────────────────────────────────────── */
 
-    this.stageContent.innerHTML = `
-      <div class="content-gradient-header" style="background:linear-gradient(180deg,${cur.color}99 0%,var(--bg-surface) 100%)">
-        <div class="playlist-header">
-          <img class="playlist-header-art" src="${cur.coverUrl}" alt="${cur.title}" />
-          <div class="playlist-header-info">
-            <div class="playlist-type-label">Discovery Radar</div>
-            <h1 class="playlist-header-title">Based on: ${cur.title}</h1>
-            <div class="playlist-header-meta">
-              <span>${cur.artist}</span>
-              <span class="dot">•</span>
-              <span>${cur.genre}</span>
-              <span class="dot">•</span>
-              <span>${cur.bpm} BPM</span>
-            </div>
-          </div>
-        </div>
-        <div class="playlist-controls-bar">
-          <button class="btn-big-play" id="btn-radar-play">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-          </button>
-        </div>
-      </div>
-      <div class="content-body">
-        <div class="section-block">
-          <div class="section-block-header">
-            <h2 class="section-block-title">Recommended tracks</h2>
-            <span class="text-muted" style="font-size:13px">Dial: ${this.discoveryDial}% (${this.discoveryDial <= 30 ? 'Comfort' : this.discoveryDial <= 70 ? 'Blend' : 'Explorer'})</span>
-          </div>
-          <div class="cards-row">
-            ${recs.map(item => `
-              <div class="media-card" data-play-track="${item.track.id}">
-                <div class="card-art-wrapper">
-                  <img class="card-art-img" src="${item.track.coverUrl}" alt="${item.track.title}" />
-                  <button class="card-play-btn" data-play-track="${item.track.id}">
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                  </button>
-                </div>
-                <div class="card-title">${item.track.title}</div>
-                <div class="card-subtitle">${item.track.artist}</div>
-                <div class="card-ai-reason">
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="11" height="11"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-                  ${item.reason}
-                </div>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-      </div>
-    `;
+  _updatePlayerBar() {
+    const t = this.player.currentTrack;
+    if (!t) return;
+    const thumb = document.getElementById('player-thumb');
+    thumb.src = t.coverUrl;
+    thumb.classList.remove('img-broken');
+    document.getElementById('player-track-title').textContent = t.title;
+    const artist = document.getElementById('player-track-artist');
+    artist.textContent = t.artist;
+    artist.dataset.artist = t.artist;
 
-    document.getElementById('btn-radar-play')?.addEventListener('click', () => {
-      const queue = [cur, ...recs.map(r => r.track)];
-      this.spotifyPlayer.playTrack(cur, queue);
-      this.showToast(`Playing Discovery Radar (${queue.length} tracks)`);
-    });
+    const like = document.getElementById('player-like-btn');
+    like.dataset.action = 'like';
+    like.dataset.trackId = t.id;
+    like.dataset.size = '18';
+    this._paintLike(like, StorageService.getLikedTrackIds().has(t.id));
 
-    this.stageContent.querySelectorAll('[data-play-track]').forEach(el => {
-      el.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const t = this.catalog.find(tr => tr.id === el.dataset.playTrack);
-        if (t) this.spotifyPlayer.playTrack(t, [cur, ...recs.map(r => r.track)]);
-      });
-    });
+    this._updateProgress(0, t.duration);
   }
 
-  /* ── LIBRARY ──────────────────────────────────────────────────────────────── */
-  renderLibrary() {
-    this.stageContent.innerHTML = `
-      <div class="content-gradient-header" style="background:linear-gradient(180deg,#1a1a2e 0%,var(--bg-surface) 100%)">
-        <h1 class="home-greeting">Your Library</h1>
-      </div>
-      <div class="content-body">
-        <div class="section-block">
-          <div class="section-block-header">
-            <h2 class="section-block-title">Playlists</h2>
-          </div>
-          <div class="cards-row" id="spotify-library-grid">
-            <div style="padding:20px; color:var(--text-muted)">Loading your library...</div>
-          </div>
-        </div>
-      </div>
-    `;
-
-    setTimeout(async () => {
-      try {
-        const playlists = await SpotifyAPI.getUserPlaylists();
-        const grid = document.getElementById('spotify-library-grid');
-        if (grid && playlists && playlists.items) {
-          let html = `
-            <div class="media-card" id="card-liked" style="cursor:pointer">
-              <div class="card-art-wrapper" style="background:linear-gradient(135deg,#7928CA,#4338CA);border-radius:var(--r-sm);display:flex;align-items:center;justify-content:center">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" width="60" height="60"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
-              </div>
-              <div class="card-title">Liked Songs</div>
-              <div class="card-subtitle">Your saved tracks</div>
-            </div>
-          `;
-          
-          html += playlists.items.map(p => {
-            if (!p) return '';
-            const img = p.images && p.images.length > 0 ? p.images[0].url : '/covers/playlist-radar.svg';
-            return `
-              <div class="media-card" data-playlist-uri="${p.uri}" data-playlist-id="${p.id}">
-                <div class="card-art-wrapper">
-                  <img class="card-art-img" src="${img}" alt="${p.name}" loading="lazy" />
-                  <button class="card-play-btn" data-play-uri="${p.uri}">
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                  </button>
-                </div>
-                <div class="card-title">${p.name}</div>
-                <div class="card-subtitle">By ${p.owner?.display_name || 'Spotify'}</div>
-              </div>
-            `;
-          }).join('');
-          
-          grid.innerHTML = html;
-          
-          document.getElementById('card-liked')?.addEventListener('click', () => this.navigate('liked'));
-          
-          grid.querySelectorAll('.media-card[data-playlist-id]').forEach(card => {
-            card.addEventListener('click', (e) => {
-              e.stopPropagation();
-              if (e.target.closest('.card-play-btn')) {
-                 this.spotifyPlayer.playContext(card.dataset.playlistUri);
-              } else {
-                 this.navigate('playlist', card.dataset.playlistId);
-              }
-            });
-          });
-        }
-      } catch (err) {
-        console.error('Error loading library:', err);
-      }
-    }, 100);
+  _updateProgress(currentTime, duration) {
+    const pct = duration > 0 ? (currentTime / duration) * 100 : 0;
+    const ranges = [
+      [document.getElementById('scrub-range'), document.getElementById('scrub-current'), document.getElementById('scrub-total')],
+      [this.theater.querySelector('.progress-range'), this.theater.querySelector('.t-cur'), this.theater.querySelector('.t-total')]
+    ];
+    for (const [range, cur, total] of ranges) {
+      if (!range || range.dataset.seeking) continue;
+      range.value = Math.round(pct * 10);
+      range.style.setProperty('--progress', `${pct}%`);
+      cur.textContent = formatTime(currentTime);
+      total.textContent = formatTime(duration);
+    }
   }
 
-  /* ── LIKED SONGS ──────────────────────────────────────────────────────────── */
-  renderLiked() {
-    this.stageContent.innerHTML = `
-      <div class="content-gradient-header" style="background:linear-gradient(180deg,#4c0080 0%,var(--bg-surface) 100%)">
-        <div class="playlist-header">
-          <div style="width:200px;height:200px;flex-shrink:0;border-radius:var(--r-sm);background:linear-gradient(135deg,#7928CA,#4338CA);display:flex;align-items:center;justify-content:center;box-shadow:0 16px 40px rgba(0,0,0,.6)">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" width="80" height="80"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
-          </div>
-          <div class="playlist-header-info">
-            <div class="playlist-type-label">Playlist</div>
-            <h1 class="playlist-header-title">Liked Songs</h1>
-            <div class="playlist-header-meta" id="spotify-liked-meta">
-              <span>Loading...</span>
-            </div>
-          </div>
-        </div>
-        <div class="playlist-controls-bar">
-          <button class="btn-big-play" id="btn-liked-play">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-          </button>
-        </div>
-      </div>
-      <div class="content-body" id="spotify-liked-body">
-         <div style="padding:20px; color:var(--text-muted)">Loading your liked tracks...</div>
-      </div>
-    `;
+  _updateModeButtons() {
+    const { shuffleMode, loopMode } = this.player;
+    const shuffle = document.getElementById('btn-shuffle');
+    const shuffleLabel = { off: 'Shuffle: off', 'true-random': 'Shuffle: true random', 'smart-flow': 'Shuffle: Smart Flow' }[shuffleMode];
+    shuffle.classList.toggle('active', shuffleMode !== 'off');
+    shuffle.innerHTML = icon('shuffle', 18) + (shuffleMode === 'smart-flow' ? `<span class="ctrl-badge">${icon('sparkle', 9)}</span>` : '');
+    shuffle.title = shuffleLabel;
+    shuffle.setAttribute('aria-label', shuffleLabel);
 
-    setTimeout(async () => {
-      try {
-        const data = await SpotifyAPI.getLikedTracks();
-        if (data && data.items) {
-          const meta = document.getElementById('spotify-liked-meta');
-          if (meta) meta.innerHTML = `<span>${data.total} songs</span>`;
-          
-          const body = document.getElementById('spotify-liked-body');
-          if (body) {
-            body.innerHTML = `
-              <div class="tracks-table">
-                <div class="tracks-header">
-                  <div class="th-col-hash">#</div>
-                  <div class="th-col-title">Title</div>
-                  <div class="th-col-album">Album</div>
-                  <div class="th-col-time">⏱</div>
-                </div>
-                <div class="tracks-list">
-                  ${data.items.map((item, i) => {
-                    const t = item.track;
-                    const img = t.album.images[0]?.url || '/covers/default.jpg';
-                    const dur = Math.floor(t.duration_ms / 1000);
-                    const mins = Math.floor(dur / 60);
-                    const secs = String(dur % 60).padStart(2, '0');
-                    return `
-                      <div class="track-row" data-track-uri="\${t.uri}">
-                        <div class="td-col-hash">\${i + 1}</div>
-                        <div class="td-col-title">
-                          <img class="td-thumb" src="\${img}" alt="" />
-                          <div class="td-title-info">
-                            <div class="td-title">\${t.name}</div>
-                            <div class="td-artist">\${t.artists.map(a=>a.name).join(', ')}</div>
-                          </div>
-                        </div>
-                        <div class="td-col-album">\${t.album.name}</div>
-                        <div class="td-col-time">\${mins}:\${secs}</div>
-                      </div>
-                    `;
-                  }).join('')}
-                </div>
-              </div>
-            `;
-            
-            body.querySelectorAll('.track-row').forEach(row => {
-              row.addEventListener('click', () => {
-                 this.spotifyPlayer.play(row.dataset.trackUri);
-              });
-            });
-            
-            document.getElementById('btn-liked-play')?.addEventListener('click', () => {
-               if (data.items.length > 0) {
-                 // For play context, user's saved tracks don't have a direct URI.
-                 this.spotifyPlayer.play(data.items[0].track.uri);
-               }
-            });
-          }
-        }
-      } catch (err) {
-        console.error('Error loading liked tracks:', err);
-      }
-    }, 100);
+    const repeat = document.getElementById('btn-repeat');
+    const repeatLabel = { off: 'Repeat: off', all: 'Repeat: all', one: 'Repeat: one' }[loopMode];
+    repeat.classList.toggle('active', loopMode !== 'off');
+    repeat.innerHTML = icon('repeat', 18) + (loopMode === 'one' ? '<span class="ctrl-badge">1</span>' : '');
+    repeat.title = repeatLabel;
+    repeat.setAttribute('aria-label', repeatLabel);
   }
 
-  /* ── PLAYLIST VIEW ────────────────────────────────────────────────────────── */
-  renderPlaylist(playlistId) {
-    this.stageContent.innerHTML = `
-      <div class="content-gradient-header" style="background:linear-gradient(180deg,#3B82F699 0%,var(--bg-surface) 100%)">
-        <div class="playlist-header">
-           <div style="width:200px;height:200px;background:#333;border-radius:var(--r-sm)"></div>
-           <div class="playlist-header-info">
-             <div class="playlist-type-label">Playlist</div>
-             <h1 class="playlist-header-title">Loading...</h1>
-           </div>
-        </div>
-      </div>
-      <div class="content-body" id="spotify-pl-body">
-         <div style="padding:20px; color:var(--text-muted)">Loading playlist tracks...</div>
-      </div>
-    `;
-
-    setTimeout(async () => {
-      try {
-        const pl = await SpotifyAPI.getPlaylist(playlistId);
-        if (pl) {
-           const img = pl.images && pl.images.length > 0 ? pl.images[0].url : '/covers/default.jpg';
-           const html = `
-             <div class="content-gradient-header" style="background:linear-gradient(180deg,#3B82F699 0%,var(--bg-surface) 100%)">
-               <div class="playlist-header">
-                 <img class="playlist-header-art" src="${img}" alt="${pl.name}" />
-                 <div class="playlist-header-info">
-                   <div class="playlist-type-label">Playlist</div>
-                   <h1 class="playlist-header-title">${pl.name}</h1>
-                   <div class="playlist-header-meta">
-                     ${pl.description ? `<span>${pl.description}</span><span class="dot">•</span>` : ''}
-                     <span>${pl.tracks.total} songs</span>
-                   </div>
-                 </div>
-               </div>
-               <div class="playlist-controls-bar">
-                 <button class="btn-big-play" id="btn-pl-play">
-                   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                 </button>
-               </div>
-             </div>
-             <div class="content-body" id="spotify-pl-body">
-               <div class="tracks-table">
-                  <div class="tracks-header">
-                    <div class="th-col-hash">#</div>
-                    <div class="th-col-title">Title</div>
-                    <div class="th-col-album">Album</div>
-                    <div class="th-col-time">⏱</div>
-                  </div>
-                  <div class="tracks-list">
-                    ${pl.tracks.items.map((item, i) => {
-                      if (!item.track) return '';
-                      const t = item.track;
-                      const tImg = t.album?.images[0]?.url || '/covers/default.jpg';
-                      const dur = Math.floor(t.duration_ms / 1000);
-                      const mins = Math.floor(dur / 60);
-                      const secs = String(dur % 60).padStart(2, '0');
-                      return `
-                        <div class="track-row" data-track-uri="\${t.uri}">
-                          <div class="td-col-hash">\${i + 1}</div>
-                          <div class="td-col-title">
-                            <img class="td-thumb" src="\${tImg}" alt="" />
-                            <div class="td-title-info">
-                              <div class="td-title">\${t.name}</div>
-                              <div class="td-artist">\${t.artists?.map(a=>a.name).join(', ')}</div>
-                            </div>
-                          </div>
-                          <div class="td-col-album">\${t.album?.name}</div>
-                          <div class="td-col-time">\${mins}:\${secs}</div>
-                        </div>
-                      `;
-                    }).join('')}
-                  </div>
-                </div>
-             </div>
-           `;
-           this.stageContent.innerHTML = html;
-           
-           this.stageContent.querySelectorAll('.track-row').forEach(row => {
-             row.addEventListener('click', () => {
-                this.spotifyPlayer.play(row.dataset.trackUri);
-             });
-           });
-           
-           document.getElementById('btn-pl-play')?.addEventListener('click', () => {
-              this.spotifyPlayer.playContext(pl.uri);
-           });
-        }
-      } catch (err) {
-        console.error('Error loading playlist:', err);
-      }
-    }, 100);
+  _updateVolumeUI() {
+    const { volume, isMuted } = this.player;
+    const level = isMuted ? 0 : volume;
+    const btn = document.getElementById('btn-mute');
+    btn.innerHTML = icon(level === 0 ? 'volume-x' : level < 0.5 ? 'volume-low' : 'volume', 18);
+    btn.setAttribute('aria-label', isMuted ? 'Unmute' : 'Mute');
+    const range = document.getElementById('volume-slider');
+    range.value = Math.round(level * 100);
+    range.style.setProperty('--progress', `${level * 100}%`);
   }
 
-  /* ── SEARCH ───────────────────────────────────────────────────────────────── */
-  renderSearchResults() {
-    const q = this.searchQuery;
-    if (!q) { this.renderHome(); return; }
-
-    this.stageContent.innerHTML = `
-      <div class="content-gradient-header" style="background:linear-gradient(180deg,#2a2a2a 0%,var(--bg-surface) 100%)">
-        <h1 class="home-greeting">Search Results: "${q}"</h1>
-      </div>
-      <div class="content-body" id="spotify-search-body">
-        <div style="padding:20px; color:var(--text-muted)">Searching Spotify...</div>
-      </div>
-    `;
-    
-    setTimeout(async () => {
-      try {
-        const results = await SpotifyAPI.search(q);
-        const body = document.getElementById('spotify-search-body');
-        if (body && results && results.tracks) {
-          body.innerHTML = `
-            <div class="tracks-table">
-              <div class="tracks-header">
-                <div class="th-col-title" style="flex:1">Top Track Results</div>
-              </div>
-              <div class="tracks-list">
-                ${results.tracks.items.map(t => {
-                  const img = t.album?.images[0]?.url || '/covers/default.jpg';
-                  const dur = Math.floor(t.duration_ms / 1000);
-                  const mins = Math.floor(dur / 60);
-                  const secs = String(dur % 60).padStart(2, '0');
-                  return `
-                    <div class="track-row" data-track-uri="\${t.uri}">
-                      <div class="td-col-title" style="flex:1">
-                        <img class="td-thumb" src="\${img}" alt="" />
-                        <div class="td-title-info">
-                          <div class="td-title">\${t.name}</div>
-                          <div class="td-artist">\${t.artists?.map(a=>a.name).join(', ')}</div>
-                        </div>
-                      </div>
-                      <div class="td-col-album">\${t.album?.name}</div>
-                      <div class="td-col-time">\${mins}:\${secs}</div>
-                    </div>
-                  `;
-                }).join('')}
-              </div>
-            </div>
-          `;
-          
-          body.querySelectorAll('.track-row').forEach(row => {
-            row.addEventListener('click', () => {
-               this.spotifyPlayer.play(row.dataset.trackUri);
-            });
-          });
-        }
-      } catch (err) {
-         console.error('Search error:', err);
-      }
-    }, 100);
-  }
-
-  /* ── Track Table Renderer (Spotify style) ─────────────────────────────────── */
-  _renderTracksTable(tracks, playlistContextId = null) {
-    const currentId = this.spotifyPlayer.currentTrack?.id;
-    const isPlaying = this.spotifyPlayer.isPlaying;
-    const likedIds  = StorageService.getLikedTrackIds();
-
-    return `
-      <div class="tracks-table-wrap">
-        <div class="tracks-table-header">
-          <span>#</span>
-          <span>Title</span>
-          <span>Album / Genre</span>
-          <span style="text-align:right">⏱</span>
-        </div>
-        ${tracks.map((t, idx) => {
-          const isCur  = t.id === currentId;
-          const isLiked = likedIds.has(t.id);
-          return `
-            <div class="track-row ${isCur ? 'playing' : ''}" data-track-id="${t.id}" data-index="${idx}">
-              <!-- # -->
-              <div class="track-num">
-                <span class="track-num-text">${idx + 1}</span>
-                <div class="track-now-playing-anim">
-                  <div class="now-bar"></div><div class="now-bar"></div><div class="now-bar"></div><div class="now-bar"></div>
-                </div>
-                <span class="track-num-play-icon">
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M8 5v14l11-7z"/></svg>
-                </span>
-              </div>
-              <!-- Title -->
-              <div class="track-info">
-                <img class="track-thumb" src="${t.coverUrl}" alt="${t.title}" />
-                <div class="track-text">
-                  <div class="track-title">${t.title}</div>
-                  <div class="track-artist">${t.artist}</div>
-                </div>
-              </div>
-              <!-- Genre -->
-              <div class="track-album">${t.genre}</div>
-              <!-- Duration + actions -->
-              <div class="track-meta-cell">
-                <button class="track-like-btn ${isLiked ? 'liked' : ''}" data-action="toggle-like" data-track-id="${t.id}">
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="${isLiked ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
-                </button>
-                <span class="track-duration">${this._formatTime(t.duration)}</span>
-                <button class="track-more-btn" data-action="add-queue" data-track-id="${t.id}" title="Add to queue">
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>
-                </button>
-                ${playlistContextId?.startsWith('custom-') ? `
-                  <button class="track-more-btn" data-action="remove-from-playlist" data-track-id="${t.id}" data-playlist-id="${playlistContextId}" title="Remove from playlist">
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                  </button>
-                ` : ''}
-              </div>
-            </div>
-          `;
-        }).join('')}
-      </div>
-    `;
-  }
-
-  _bindTableActions(playlistContextId = null) {
-    // Row click → play
-    this.stageContent.querySelectorAll('.track-row').forEach(row => {
-      row.addEventListener('click', (e) => {
-        if (e.target.closest('button')) return;
-        const id  = row.dataset.trackId;
-        const track = this.catalog.find(t => t.id === id);
-        if (!track) return;
-        const rows    = Array.from(this.stageContent.querySelectorAll('.track-row'));
-        const context = rows.map(r => this.catalog.find(t => t.id === r.dataset.trackId)).filter(Boolean);
-        this.spotifyPlayer.playTrack(track, context);
-      });
-    });
-
-    // Like toggle
-    this.stageContent.querySelectorAll('[data-action="toggle-like"]').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const id      = btn.dataset.trackId;
-        const liked   = StorageService.toggleLike(id);
-        btn.classList.toggle('liked', liked);
-        btn.querySelector('svg')?.setAttribute('fill', liked ? 'currentColor' : 'none');
-        if (liked) confetti({ particleCount: 20, spread: 50 });
-        this.showToast(liked ? 'Added to Liked Songs' : 'Removed from Liked Songs');
-        if (this.spotifyPlayer.currentTrack?.id === id) this._updatePlayerBar(this.spotifyPlayer.currentTrack);
-        if (this.currentView === 'liked') this.renderLiked();
-      });
-    });
-
-    // Add to queue
-    this.stageContent.querySelectorAll('[data-action="add-queue"]').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const track = this.catalog.find(t => t.id === btn.dataset.trackId);
-        if (track) {
-          this.spotifyPlayer.addToQueue(track);
-          this.showToast(`Added "${track.title}" to queue`);
-          if (this.activePanelTab === 'queue') this._renderPanelQueue();
-        }
-      });
-    });
-
-    // Remove from playlist
-    this.stageContent.querySelectorAll('[data-action="remove-from-playlist"]').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        StorageService.removeTrackFromPlaylist(btn.dataset.playlistId, btn.dataset.trackId);
-        this.showToast('Removed from playlist');
-        this.renderPlaylist(btn.dataset.playlistId);
-      });
-    });
-  }
-
-  /* ── Highlight active playing row ─────────────────────────────────────────── */
-  _highlightActiveRow() {
-    const curId     = this.spotifyPlayer.currentTrack?.id;
-    const isPlaying = this.spotifyPlayer.isPlaying;
+  /** Sync every "is this playing" indicator in the DOM with the player. */
+  _refreshPlayingState() {
+    const curId = this.player.currentTrack?.id;
+    const playing = this.player.isPlaying;
 
     document.querySelectorAll('.track-row').forEach(row => {
       const isCur = row.dataset.trackId === curId;
-      row.classList.toggle('playing', isCur);
+      row.classList.toggle('is-current', isCur);
+      row.classList.toggle('is-playing', isCur && playing);
+    });
 
-      const numText  = row.querySelector('.track-num-text');
-      const anim     = row.querySelector('.track-now-playing-anim');
-      if (numText && anim) {
-        numText.style.display = (isCur && isPlaying) ? 'none' : 'block';
-        anim.style.display    = (isCur && isPlaying) ? 'flex'  : 'none';
+    document.querySelectorAll('[data-action="play-context"]').forEach(btn => {
+      const active = btn.dataset.context === this.contextId && playing;
+      btn.innerHTML = icon(active ? 'pause' : 'play', Number(btn.dataset.size) || 22);
+      btn.setAttribute('aria-label', active ? 'Pause' : 'Play');
+      btn.classList.toggle('is-playing', active);
+    });
+
+    document.querySelectorAll('[data-context-id]').forEach(item => {
+      const isCur = item.dataset.contextId === this.contextId;
+      item.classList.toggle('is-current', isCur);
+      item.classList.toggle('is-playing', isCur && playing);
+    });
+  }
+
+  /* ── Likes, follows, playlists ────────────────────────────────────────── */
+
+  _likeBtn(id, size = 16) {
+    const liked = StorageService.getLikedTrackIds().has(id);
+    return `<button class="icon-btn like-btn ${liked ? 'liked' : ''}" data-action="like" data-track-id="${id}" data-size="${size}"
+      aria-pressed="${liked}" aria-label="${liked ? 'Remove from Liked Songs' : 'Save to Liked Songs'}">${icon(liked ? 'heart-fill' : 'heart', size)}</button>`;
+  }
+
+  _paintLike(btn, liked) {
+    btn.classList.toggle('liked', liked);
+    btn.innerHTML = icon(liked ? 'heart-fill' : 'heart', Number(btn.dataset.size) || 16);
+    btn.setAttribute('aria-pressed', liked);
+    btn.setAttribute('aria-label', liked ? 'Remove from Liked Songs' : 'Save to Liked Songs');
+  }
+
+  toggleLike(id) {
+    const liked = StorageService.toggleLike(id);
+    document.querySelectorAll(`[data-action="like"][data-track-id="${id}"]`).forEach(b => this._paintLike(b, liked));
+    this.toast(liked ? 'Added to Liked Songs' : 'Removed from Liked Songs');
+    this._renderSidebar();
+    if (this.view?.name === 'liked') this.renderView();
+  }
+
+  toggleFollow(name) {
+    const following = StorageService.toggleFollowArtist(name);
+    document.querySelectorAll(`[data-action="follow"]`).forEach(b => {
+      if (b.dataset.artist !== name) return;
+      b.textContent = following ? 'Following' : 'Follow';
+      b.classList.toggle('following', following);
+    });
+    this.toast(following ? `Following ${name}` : `Unfollowed ${name}`);
+    this._renderSidebar();
+  }
+
+  _followBtn(name) {
+    const following = StorageService.getFollowedArtists().has(name);
+    return `<button class="btn btn-outline ${following ? 'following' : ''}" data-action="follow" data-artist="${esc(name)}">${following ? 'Following' : 'Follow'}</button>`;
+  }
+
+  openCreatePlaylist(trackIds = []) {
+    this.pendingTrackIds = trackIds;
+    document.getElementById('create-playlist-modal').classList.add('open');
+    setTimeout(() => document.getElementById('playlist-name-input').focus(), 50);
+  }
+
+  addToPlaylist(playlistId, track) {
+    const pl = this._getPlaylist(playlistId);
+    const added = StorageService.addTrackToPlaylist(playlistId, track.id);
+    this.toast(added ? `Added to "${pl.title}"` : `Already in "${pl.title}"`);
+    this._renderSidebar();
+    if (this.view?.name === 'playlist' && this.view.param === playlistId) this.renderView();
+  }
+
+  removeFromPlaylist(playlistId, trackId) {
+    const before = StorageService.getCustomPlaylists();
+    const pl = before.find(p => p.id === playlistId);
+    StorageService.removeTrackFromPlaylist(playlistId, trackId);
+    const refresh = () => {
+      this._renderSidebar();
+      if (this.view?.name === 'playlist' && this.view.param === playlistId) this.renderView();
+    };
+    refresh();
+    this.toast(`Removed from "${pl.title}"`, { undo: () => { StorageService.saveCustomPlaylists(before); refresh(); } });
+  }
+
+  deletePlaylist(id) {
+    const before = StorageService.getCustomPlaylists();
+    const pl = before.find(p => p.id === id);
+    StorageService.deletePlaylist(id);
+    this._renderSidebar();
+    if (this.view?.name === 'playlist' && this.view.param === id) this.navigate('home');
+    this.toast(`Deleted "${pl.title}"`, {
+      undo: () => {
+        StorageService.saveCustomPlaylists(before);
+        this._renderSidebar();
+        if (this.view?.name === 'home') this.renderView();
       }
     });
   }
 
-  /* ── Toast ────────────────────────────────────────────────────────────────── */
-  showToast(message, options = {}) {
-    const stack = document.getElementById('toast-stack');
-    if (!stack) return;
-    const toast = document.createElement('div');
-    toast.className = 'toast';
-    
-    let undoHtml = '';
-    if (typeof options.undoAction === 'function') {
-      undoHtml = `<button class="toast-undo-btn" type="button">Undo</button>`;
+  /* ── Context menu ─────────────────────────────────────────────────────── */
+
+  openTrackMenu(anchor, trackId, playlistId) {
+    const t = TRACKS.get(trackId);
+    if (!t) return;
+    const liked = StorageService.getLikedTrackIds().has(t.id);
+    const custom = StorageService.getCustomPlaylists();
+
+    const playlistItems = [
+      { label: 'New playlist', icon: 'plus', run: () => this.openCreatePlaylist([t.id]) },
+      ...custom.map(pl => ({ label: pl.title, icon: 'music', run: () => this.addToPlaylist(pl.id, t) }))
+    ];
+
+    this._openMenu(anchor, [
+      { label: 'Add to queue', icon: 'list-plus', run: () => { this.player.addToQueue(t); this.toast('Added to queue'); } },
+      { label: 'Play next', icon: 'play-next', run: () => { this.player.addToQueue(t, true); this.toast(`"${t.title}" will play next`); } },
+      { label: 'Add to playlist', icon: 'plus', submenu: true, run: () => this._openMenu(anchor, playlistItems, 'Add to playlist') },
+      playlistId ? { label: 'Remove from this playlist', icon: 'trash', run: () => this.removeFromPlaylist(playlistId, t.id) } : null,
+      { label: liked ? 'Remove from Liked Songs' : 'Save to Liked Songs', icon: liked ? 'heart-fill' : 'heart', run: () => this.toggleLike(t.id) },
+      { divider: true },
+      { label: 'Go to song radio', icon: 'compass', run: () => this.navigate('discover', t.id) },
+      { label: 'Go to artist', icon: 'user', run: () => this.navigate('artist', t.artist) }
+    ].filter(Boolean));
+  }
+
+  openPlaylistMenu(anchor, id) {
+    this._openMenu(anchor, [
+      { label: 'Add to queue', icon: 'list-plus', run: () => {
+        this._contextTracks(`playlist:${id}`).forEach(t => this.player.addToQueue(t));
+        this.toast('Added to queue');
+      } },
+      { divider: true },
+      { label: 'Delete playlist', icon: 'trash', danger: true, run: () => this.deletePlaylist(id) }
+    ]);
+  }
+
+  _openMenu(anchor, items, title = '') {
+    this.menuItems = items;
+    this.menuAnchor = anchor;
+    this.menu.innerHTML = (title ? `<div class="menu-title">${esc(title)}</div>` : '') + items.map((it, i) => it.divider
+      ? '<div class="menu-divider" role="separator"></div>'
+      : `<button class="menu-item ${it.danger ? 'danger' : ''}" role="menuitem" data-action="menu-item" data-index="${i}">
+          ${icon(it.icon, 16)}<span>${esc(it.label)}</span>${it.submenu ? icon('chevron-right', 16, 'menu-chevron') : ''}
+        </button>`).join('');
+    this.menu.hidden = false;
+
+    const r = anchor.getBoundingClientRect();
+    const m = this.menu.getBoundingClientRect();
+    const left = Math.max(8, Math.min(r.right - m.width, window.innerWidth - m.width - 8));
+    let top = r.bottom + 4;
+    if (top + m.height > window.innerHeight - 8) top = Math.max(8, r.top - m.height - 4);
+    this.menu.style.left = `${left}px`;
+    this.menu.style.top = `${top}px`;
+    this.menu.querySelector('.menu-item')?.focus({ preventScroll: true });
+  }
+
+  _closeMenu() {
+    if (this.menu.hidden) return;
+    this.menu.hidden = true;
+    this.menuAnchor = null;
+  }
+
+  /* ── Explainable recommendations ──────────────────────────────────────── */
+
+  openExplain(trackId, seedId = null) {
+    const track = TRACKS.get(trackId);
+    if (!track) return;
+    this.explainTrackId = trackId;
+    // Song radio explains against its seed; the personal mix picks each song via the closest liked song
+    // (or the engine's default references when nothing is liked yet), so explain against that.
+    const liked = this._likedTracks().filter(t => t.id !== track.id);
+    const refs = liked.length ? liked : [CATALOG[0], CATALOG[2], CATALOG[5]].filter(t => t.id !== track.id);
+    const sim = t => RecommendationEngine.calculateSimilarity(t, track, this.dial);
+    const seed = TRACKS.get(seedId) || refs.reduce((best, t) => (sim(t) > sim(best) ? t : best));
+    const because = seedId ? 'pairs with' : liked.length ? 'because you like' : 'similar to';
+
+    const related = RecommendationEngine.GENRE_AFFINITIES[seed.genre]?.includes(track.genre);
+    const genre = seed.genre === track.genre ? 1 : related ? 0.65 : 0.15;
+    const bpmDiff = Math.abs(seed.bpm - track.bpm);
+    const rows = [
+      ['Genre', genre, seed.genre === track.genre ? `Both ${track.genre}` : related ? `${seed.genre} → ${track.genre} (related)` : `${seed.genre} → ${track.genre}`],
+      ['Mood', seed.mood === track.mood ? 1 : 0.4, seed.mood === track.mood ? `Both ${track.mood}` : `${seed.mood} → ${track.mood}`],
+      ['Tempo', Math.max(0, 1 - bpmDiff / 80), `${track.bpm} BPM (${bpmDiff === 0 ? 'same tempo' : `±${bpmDiff}`})`],
+      ['Energy', 1 - Math.abs(seed.vector.energy - track.vector.energy), `${Math.round(track.vector.energy * 100)} vs ${Math.round(seed.vector.energy * 100)}`],
+      ['Positivity', 1 - Math.abs(seed.vector.valence - track.vector.valence), `${Math.round(track.vector.valence * 100)} vs ${Math.round(seed.vector.valence * 100)}`]
+    ];
+
+    document.getElementById('explain-body').innerHTML = `
+      <div class="explain-pair">
+        <div class="explain-track"><img src="${track.coverUrl}" alt=""><div><div class="explain-name">${esc(track.title)}</div><div class="muted">${esc(track.artist)}</div></div></div>
+        <div class="explain-because">${because}</div>
+        <div class="explain-track"><img src="${seed.coverUrl}" alt=""><div><div class="explain-name">${esc(seed.title)}</div><div class="muted">${esc(seed.artist)}</div></div></div>
+      </div>
+      <p class="explain-reason">${esc(RecommendationEngine.generateReason(seed, track, this.dial))}</p>
+      <div class="explain-rows">
+        ${rows.map(([label, score, detail]) => `
+          <div class="explain-row">
+            <span class="explain-label">${label}</span>
+            <div class="meter"><div class="meter-fill" style="width:${Math.round(score * 100)}%"></div></div>
+            <span class="explain-detail">${esc(detail)}</span>
+          </div>`).join('')}
+      </div>
+      <p class="muted small">Discovery Dial at ${this.dial}% (${dialMode(this.dial)}): ${this.dial > 60 ? 'genre counts less, mood and energy count more.' : 'genre and tempo matter most.'}</p>`;
+    document.getElementById('explain-rec-modal').classList.add('open');
+  }
+
+  /* ── Discovery dial ───────────────────────────────────────────────────── */
+
+  setDial(value, rerender = true) {
+    this.dial = value;
+    StorageService.saveDiscoveryDial(value);
+    this._updateDialUI();
+    if (rerender && (this.view?.name === 'home' || this.view?.name === 'discover')) this.renderView();
+  }
+
+  _updateDialUI() {
+    document.querySelectorAll('.dial-range').forEach(r => {
+      r.value = this.dial;
+      r.style.setProperty('--progress', `${this.dial}%`);
+    });
+    document.querySelectorAll('.dial-value').forEach(l => { l.textContent = dialMode(this.dial); });
+  }
+
+  /* ── Navigation ───────────────────────────────────────────────────────── */
+
+  navigate(name, param = null) {
+    if (this.theaterOpen) this.closeTheater();
+    if (this.view && this.view.name === name && this.view.param === param) {
+      this.main.scrollTo({ top: 0, behavior: 'smooth' });
+      if (name === 'search') this.omnibox.focus();
+      return;
+    }
+    if (this.view) this.history.push(this.view);
+    if (this.history.length > 50) this.history.shift();
+    this.future = [];
+    this._show({ name, param });
+  }
+
+  back() {
+    if (!this.history.length) return;
+    this.future.push(this.view);
+    this._show(this.history.pop());
+  }
+
+  forward() {
+    if (!this.future.length) return;
+    this.history.push(this.view);
+    this._show(this.future.pop());
+  }
+
+  _show(view) {
+    this.view = view;
+    this.main.scrollTop = 0;
+    this.renderView();
+    this._renderSidebar();
+    document.getElementById('btn-nav-back').disabled = !this.history.length;
+    document.getElementById('btn-nav-forward').disabled = !this.future.length;
+    document.querySelectorAll('.mobile-nav-btn').forEach(b => b.classList.toggle('active', b.dataset.nav === view.name));
+    if (view.name === 'search') {
+      this.omnibox.value = this.searchQuery;
+      this.omnibox.focus({ preventScroll: true });
+    }
+  }
+
+  renderView() {
+    this.lists = {};
+    const { name, param } = this.view;
+    const render = {
+      home: () => this.renderHome(),
+      playlist: () => this.renderPlaylist(param),
+      liked: () => this.renderLiked(),
+      artist: () => this.renderArtist(param),
+      search: () => this.renderSearch(),
+      discover: () => this.renderDiscover(param),
+      library: () => this.renderLibrary()
+    }[name] || (() => this.renderHome());
+    render();
+    this._refreshPlayingState();
+  }
+
+  /* ── Shared view markup ───────────────────────────────────────────────── */
+
+  _cover(pl, cls) {
+    if (pl.id === 'liked') return `<div class="${cls} cover-liked">${icon('heart-fill', 24)}</div>`;
+    if (pl.coverUrl && !pl.id.startsWith('custom-')) return `<img class="${cls}" src="${pl.coverUrl}" alt="" loading="lazy">`;
+    const arts = [...new Set(tracksFor(pl.trackIds).map(t => t.coverUrl))].slice(0, 4);
+    if (arts.length === 4) return `<div class="${cls} cover-mosaic">${arts.map(a => `<img src="${a}" alt="" loading="lazy">`).join('')}</div>`;
+    if (arts.length) return `<img class="${cls}" src="${arts[0]}" alt="" loading="lazy">`;
+    return `<div class="${cls} cover-empty">${icon('music', 24)}</div>`;
+  }
+
+  _playFab(ctx, size = 22, cls = '') {
+    return `<button class="play-fab ${cls}" data-action="play-context" data-context="${esc(ctx)}" data-size="${size}" aria-label="Play">${icon('play', size)}</button>`;
+  }
+
+  _header({ color, art, type, title, desc = '', meta = '', round = false }) {
+    return `
+      <div class="view-bg" style="--header-color:${color}"></div>
+      <header class="view-header">
+        <div class="header-art ${round ? 'round' : ''}">${art}</div>
+        <div class="header-info">
+          <span class="header-type">${type}</span>
+          <h1 class="header-title ${title.length > 24 ? 'long' : title.length > 12 ? 'medium' : ''}">${esc(title)}</h1>
+          ${desc ? `<p class="header-desc">${esc(desc)}</p>` : ''}
+          <div class="header-meta">${meta}</div>
+        </div>
+      </header>`;
+  }
+
+  _stickyBar(title, ctx, color) {
+    return `<div class="sticky-bar" style="--header-color:${color}">${this._playFab(ctx, 18, 'sm')}<span class="sticky-title">${esc(title)}</span></div>`;
+  }
+
+  /**
+   * Song table. `contextId` keys the list for row clicks; `secondary` overrides the album column.
+   */
+  _trackTable(tracks, contextId, { playlistId = null, secondary = null, showArt = true } = {}) {
+    this.lists[contextId] = tracks;
+    return `
+      <div class="track-table">
+        <div class="track-head">
+          <span class="tr-num">#</span><span>Title</span><span class="tr-album">${secondary ? 'Why it fits' : 'Album'}</span>
+          <span class="tr-end">${icon('clock', 16)}</span>
+        </div>
+        ${tracks.map((t, i) => `
+          <div class="track-row" tabindex="0" data-action="play-row" data-list="${esc(contextId)}" data-index="${i}" data-track-id="${t.id}">
+            <div class="tr-num">
+              <span class="tr-index">${i + 1}</span>
+              <span class="tr-play">${icon('play', 14)}</span>
+              <span class="tr-pause">${icon('pause', 14)}</span>
+              <span class="tr-bars" aria-hidden="true"><i></i><i></i><i></i></span>
+            </div>
+            <div class="tr-main">
+              ${showArt ? `<img class="tr-art" src="${t.coverUrl}" alt="" loading="lazy">` : ''}
+              <div class="tr-text">
+                <div class="tr-title">${esc(t.title)}</div>
+                <button class="tr-artist link" data-nav="artist" data-id="${esc(t.artist)}">${esc(t.artist)}</button>
+              </div>
+            </div>
+            <div class="tr-album">${secondary ? secondary(t) : esc(t.album || t.genre)}</div>
+            <div class="tr-end">
+              ${this._likeBtn(t.id)}
+              <span class="tr-time">${formatTime(t.duration)}</span>
+              <button class="icon-btn tr-more" data-action="more" data-track-id="${t.id}" ${playlistId ? `data-playlist-id="${playlistId}"` : ''} aria-label="More options for ${esc(t.title)}">${icon('more', 16)}</button>
+            </div>
+          </div>`).join('')}
+      </div>`;
+  }
+
+  _section(title, body, { sub = '', more = null, cls = '' } = {}) {
+    return `
+      <section class="section">
+        <div class="section-head">
+          <div><h2 class="section-title">${title}</h2>${sub ? `<p class="section-sub">${sub}</p>` : ''}</div>
+          ${more ? `<button class="link section-more" data-nav="${more}">Show all</button>` : ''}
+        </div>
+        <div class="shelf ${cls}">${body}</div>
+      </section>`;
+  }
+
+  _playlistCard(pl) {
+    const isLiked = pl.id === 'liked';
+    const ctx = isLiked ? 'liked' : `playlist:${pl.id}`;
+    const sub = isLiked ? plural(pl.trackIds.length, 'song') : (pl.description || `By ${pl.id.startsWith('custom-') ? 'you' : 'AuraStream'}`);
+    return `
+      <div class="card" data-nav="${isLiked ? 'liked' : 'playlist'}" ${isLiked ? '' : `data-id="${pl.id}"`}>
+        <div class="card-art">${this._cover(pl, 'card-img')}${this._playFab(ctx, 22, 'card-fab')}</div>
+        <div class="card-title">${esc(pl.title)}</div>
+        <div class="card-sub">${esc(sub)}</div>
+      </div>`;
+  }
+
+  _trackCard(t, listId, index, reason = '') {
+    return `
+      <div class="card" data-action="play-row" tabindex="0" data-list="${esc(listId)}" data-index="${index}">
+        <div class="card-art"><img class="card-img" src="${t.coverUrl}" alt="" loading="lazy">
+          <button class="play-fab card-fab" data-action="play-row" data-list="${esc(listId)}" data-index="${index}" aria-label="Play ${esc(t.title)}">${icon('play', 22)}</button>
+        </div>
+        <div class="card-title">${esc(t.title)}</div>
+        <div class="card-sub">${esc(t.artist)}</div>
+        ${reason ? `<button class="reason-chip" data-action="explain" data-track-id="${t.id}" title="Why this recommendation?">${icon('sparkle', 12)}<span>${esc(reason)}</span></button>` : ''}
+      </div>`;
+  }
+
+  _artistCard(name) {
+    const info = ARTIST_DATA[name];
+    return `
+      <div class="card" data-nav="artist" data-id="${esc(name)}">
+        <div class="card-art round"><img class="card-img" src="${info.photo}" alt="" loading="lazy">${this._playFab(`artist:${name}`, 22, 'card-fab')}</div>
+        <div class="card-title">${esc(name)}</div>
+        <div class="card-sub">Artist</div>
+      </div>`;
+  }
+
+  _empty(iconName, title, text, action = '') {
+    return `<div class="empty">${icon(iconName, 40)}<h3>${title}</h3><p>${text}</p>${action}</div>`;
+  }
+
+  /* ── Views ────────────────────────────────────────────────────────────── */
+
+  renderHome() {
+    const liked = this._likedPlaylist();
+    const playlists = this._allPlaylists();
+    const likedIds = StorageService.getLikedTrackIds();
+    const history = StorageService.getHistory();
+    const mix = RecommendationEngine.getPersonalizedMix(CATALOG, likedIds, history, this.dial, 10);
+    this.lists['made-for-you'] = mix.map(m => m.track);
+    const recent = tracksFor(history.map(h => h.trackId)).slice(0, 10);
+    this.lists.recent = recent;
+
+    const quick = [liked, ...playlists].slice(0, 6).map(pl => {
+      const isLiked = pl.id === 'liked';
+      return `
+        <div class="quick-tile" data-nav="${isLiked ? 'liked' : 'playlist'}" ${isLiked ? '' : `data-id="${pl.id}"`} data-context-id="${isLiked ? 'liked' : `playlist:${pl.id}`}">
+          ${this._cover(pl, 'quick-img')}
+          <span class="quick-title">${esc(pl.title)}</span>
+          ${this._playFab(isLiked ? 'liked' : `playlist:${pl.id}`, 18, 'sm quick-fab')}
+        </div>`;
+    }).join('');
+
+    this.stage.innerHTML = `
+      <div class="view view-home">
+        <div class="view-bg" style="--header-color:var(--aura)"></div>
+        <h1 class="greeting">${greeting()}</h1>
+        <div class="quick-grid">${quick}</div>
+        ${this._section('Made for you', mix.map((m, i) => this._trackCard(m.track, 'made-for-you', i, m.reason)).join(''),
+          { sub: `Based on your liked songs · Discovery Dial: ${dialMode(this.dial)}`, more: 'discover' })}
+        ${recent.length ? this._section('Recently played', recent.map((t, i) => this._trackCard(t, 'recent', i)).join('')) : ''}
+        ${this._section('Playlists', [liked, ...playlists].map(pl => this._playlistCard(pl)).join(''), { more: 'library' })}
+        ${this._section('Artists', ARTISTS.map(a => this._artistCard(a)).join(''))}
+        <footer class="view-footer">Music by independent artists under Creative Commons licenses. Credits in each song's details.</footer>
+      </div>`;
+  }
+
+  renderPlaylist(id) {
+    const pl = this._getPlaylist(id);
+    if (!pl) {
+      this.stage.innerHTML = `<div class="view">${this._empty('music', "Couldn't find that playlist", 'It may have been deleted.', '<button class="btn btn-primary" data-nav="home">Go home</button>')}</div>`;
+      return;
+    }
+    const tracks = tracksFor(pl.trackIds);
+    const custom = id.startsWith('custom-');
+    const total = tracks.reduce((s, t) => s + t.duration, 0);
+    const ctx = `playlist:${id}`;
+
+    this.stage.innerHTML = `
+      <div class="view">
+        ${this._stickyBar(pl.title, ctx, pl.color)}
+        ${this._header({
+          color: pl.color, art: this._cover(pl, 'header-img'), type: 'Playlist', title: pl.title, desc: pl.description,
+          meta: `<strong>${custom ? 'You' : 'AuraStream'}</strong><span class="dot">•</span>${plural(tracks.length, 'song')}${tracks.length ? `, ${formatTotal(total)}` : ''}`
+        })}
+        <div class="view-actions">
+          ${tracks.length ? this._playFab(ctx, 24, 'lg') : ''}
+          ${custom ? `<button class="icon-btn action-more" data-action="playlist-more" data-id="${id}" aria-label="More options for ${esc(pl.title)}">${icon('more', 28)}</button>` : ''}
+        </div>
+        <div class="view-body">
+          ${tracks.length
+            ? this._trackTable(tracks, ctx, { playlistId: custom ? id : null })
+            : this._empty('music', "Let's find something for your playlist", 'Use the ••• menu on any song and choose "Add to playlist".', '<button class="btn btn-primary" data-nav="search">Browse songs</button>')}
+        </div>
+      </div>`;
+  }
+
+  renderLiked() {
+    const tracks = this._likedTracks();
+    const liked = this._likedPlaylist();
+    this.stage.innerHTML = `
+      <div class="view">
+        ${this._stickyBar('Liked Songs', 'liked', LIKED_COLOR)}
+        ${this._header({
+          color: LIKED_COLOR, art: this._cover(liked, 'header-img'), type: 'Playlist', title: 'Liked Songs',
+          meta: `<strong>You</strong><span class="dot">•</span>${plural(tracks.length, 'song')}`
+        })}
+        <div class="view-actions">${tracks.length ? this._playFab('liked', 24, 'lg') : ''}</div>
+        <div class="view-body">
+          ${tracks.length
+            ? this._trackTable(tracks, 'liked')
+            : this._empty('heart', 'Songs you like will appear here', 'Save songs by tapping the heart icon.', '<button class="btn btn-primary" data-nav="search">Find songs</button>')}
+        </div>
+      </div>`;
+  }
+
+  renderArtist(name) {
+    const info = ARTIST_DATA[name];
+    const tracks = artistTracks(name);
+    if (!info || !tracks.length) {
+      this.stage.innerHTML = `<div class="view">${this._empty('user', "Couldn't find that artist", '', '<button class="btn btn-primary" data-nav="home">Go home</button>')}</div>`;
+      return;
+    }
+    const ctx = `artist:${name}`;
+    const color = tracks[0].color;
+    this.stage.innerHTML = `
+      <div class="view">
+        ${this._stickyBar(name, ctx, color)}
+        <header class="artist-hero" style="--header-color:${color}">
+          <img class="artist-hero-img" src="${info.photo}" alt="">
+          <div class="artist-hero-info">
+            <span class="verified">${icon('verified', 22)} Verified Artist</span>
+            <h1 class="header-title">${esc(name)}</h1>
+            <p class="header-meta">${esc(info.listeners)}</p>
+          </div>
+        </header>
+        <div class="view-bg short" style="--header-color:${color}"></div>
+        <div class="view-actions">${this._playFab(ctx, 24, 'lg')}${this._followBtn(name)}</div>
+        <div class="view-body">
+          <h2 class="section-title">Popular</h2>
+          ${this._trackTable(tracks, ctx)}
+          <h2 class="section-title spaced">About</h2>
+          <div class="about-card" style="background-image:url('${info.photo}')">
+            <div class="about-inner">
+              <div class="about-listeners">${esc(info.listeners)}</div>
+              <p>${esc(info.bio)}</p>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  renderDiscover(seedId) {
+    const seed = TRACKS.get(seedId) || this.player.currentTrack || CATALOG[0];
+    const recs = RecommendationEngine.getRecommendationsForTrack(seed, CATALOG, this.dial, 12);
+    const tracks = [seed, ...recs.map(r => r.track)];
+    const reasons = new Map(recs.map(r => [r.track.id, r.reason]));
+    const ctx = 'discover';
+
+    this.stage.innerHTML = `
+      <div class="view">
+        ${this._stickyBar('Discovery Radar', ctx, seed.color)}
+        ${this._header({
+          color: seed.color,
+          art: `<div class="header-img radar-art" style="--a:${seed.color};--b:${seed.accentColor}"><img src="${seed.coverUrl}" alt="">${icon('compass', 36)}</div>`,
+          type: 'Song radio', title: `${seed.title} Radio`,
+          desc: `Songs that pair with "${seed.title}". Turn the Discovery Dial down to stay close, up to cross genres.`,
+          meta: `<strong>AuraStream</strong><span class="dot">•</span>${plural(tracks.length, 'song')}`
+        })}
+        <div class="view-actions">
+          ${this._playFab(ctx, 24, 'lg')}
+          <div class="dial dial-inline">
+            ${icon('compass', 18)}
+            <input class="range dial-range" type="range" min="0" max="100" value="${this.dial}" aria-label="Discovery Dial">
+            <span class="dial-value">${dialMode(this.dial)}</span>
+          </div>
+        </div>
+        <div class="view-body">
+          ${this._trackTable(tracks, ctx, {
+            secondary: t => (reasons.has(t.id)
+              ? `<button class="link reason-link" data-action="explain" data-track-id="${t.id}" data-seed-id="${seed.id}">${esc(reasons.get(t.id))}</button>`
+              : '<span class="muted">Seed song</span>')
+          })}
+        </div>
+      </div>`;
+
+    const dial = this.stage.querySelector('.dial-inline .dial-range');
+    dial.style.setProperty('--progress', `${this.dial}%`);
+    dial.addEventListener('input', () => this.setDial(Number(dial.value), false));
+    dial.addEventListener('change', () => {
+      this.renderView();
+      this.stage.querySelector('.dial-inline .dial-range')?.focus();
+    });
+  }
+
+  renderSearch() {
+    const q = this.searchQuery.trim().toLowerCase();
+    if (!q) return this._renderBrowse();
+
+    const terms = q.split(/\s+/);
+    const songs = CATALOG.filter(t => terms.every(term =>
+      [t.title, t.artist, t.album, t.genre, t.mood, `${t.bpm} bpm`].some(f => f?.toLowerCase().includes(term))));
+    const artists = ARTISTS.filter(a => a.toLowerCase().includes(q));
+    const playlists = this._allPlaylists().filter(p => `${p.title} ${p.description || ''}`.toLowerCase().includes(q));
+
+    if (!songs.length && !artists.length && !playlists.length) {
+      this.stage.innerHTML = `<div class="view">${this._empty('search', `No results found for "${esc(this.searchQuery.trim())}"`, 'Check the spelling, or search for a genre, mood or tempo like "chill" or "120 bpm".')}</div>`;
+      return;
     }
 
-    toast.innerHTML = `
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="16" height="16" style="color:var(--brand-green); flex-shrink:0;"><polyline points="20 6 9 17 4 12"/></svg>
-      <span style="flex:1;">${message}</span>
-      ${undoHtml}
-    `;
+    let top;
+    if (artists.length) {
+      const name = artists[0];
+      top = `
+        <div class="top-result" data-nav="artist" data-id="${esc(name)}">
+          <img class="top-img round" src="${ARTIST_DATA[name].photo}" alt="">
+          <div class="top-title">${esc(name)}</div>
+          <div class="top-sub"><span class="pill">Artist</span></div>
+          ${this._playFab(`artist:${name}`, 22, 'card-fab')}
+        </div>`;
+    } else if (songs.length) {
+      const t = songs[0];
+      top = `
+        <div class="top-result" data-action="play-row" tabindex="0" data-list="search" data-index="0">
+          <img class="top-img" src="${t.coverUrl}" alt="">
+          <div class="top-title">${esc(t.title)}</div>
+          <div class="top-sub"><span class="pill">Song</span>${esc(t.artist)}</div>
+          <button class="play-fab card-fab" data-action="play-row" data-list="search" data-index="0" aria-label="Play ${esc(t.title)}">${icon('play', 22)}</button>
+        </div>`;
+    } else {
+      top = `<div class="top-result" data-nav="playlist" data-id="${playlists[0].id}">${this._cover(playlists[0], 'top-img')}<div class="top-title">${esc(playlists[0].title)}</div><div class="top-sub"><span class="pill">Playlist</span></div></div>`;
+    }
 
-    if (typeof options.undoAction === 'function') {
-      const undoBtn = toast.querySelector('.toast-undo-btn');
-      if (undoBtn) {
-        undoBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          options.undoAction();
-          toast.remove();
+    this.stage.innerHTML = `
+      <div class="view view-search">
+        <div class="search-top">
+          <section class="section"><h2 class="section-title">Top result</h2>${top}</section>
+          ${songs.length ? `<section class="section"><h2 class="section-title">Songs</h2>${this._trackTable(songs, 'search')}</section>` : ''}
+        </div>
+        ${artists.length ? this._section('Artists', artists.map(a => this._artistCard(a)).join('')) : ''}
+        ${playlists.length ? this._section('Playlists', playlists.map(p => this._playlistCard(p)).join('')) : ''}
+      </div>`;
+  }
+
+  _renderBrowse() {
+    const tile = (label, t) => `
+      <button class="browse-tile" data-action="browse" data-query="${esc(label)}" style="--tile:${t.color}">
+        <span>${esc(label)}</span><img src="${t.coverUrl}" alt="" loading="lazy">
+      </button>`;
+    const firstBy = key => [...new Map(CATALOG.map(t => [t[key], t])).entries()].reverse();
+    this.stage.innerHTML = `
+      <div class="view">
+        <h2 class="section-title">Browse by genre</h2>
+        <div class="browse-grid">${firstBy('genre').map(([g, t]) => tile(g, t)).join('')}</div>
+        <h2 class="section-title spaced">Browse by mood</h2>
+        <div class="browse-grid">${firstBy('mood').map(([m, t]) => tile(m, t)).join('')}</div>
+      </div>`;
+  }
+
+  setSearch(query) {
+    this.searchQuery = query;
+    this.omnibox.value = query;
+    if (this.view?.name === 'search') this.renderView();
+    else this.navigate('search');
+  }
+
+  renderLibrary() {
+    this.stage.innerHTML = `
+      <div class="view">
+        <div class="library-page-head">
+          <h1 class="greeting">Your Library</h1>
+          <button class="btn btn-outline" data-action="create-playlist">${icon('plus', 16)} New playlist</button>
+        </div>
+        <div class="chip-row">
+          ${['all', 'playlists', 'artists'].map(f => `<button class="chip ${this.libraryFilter === f ? 'active' : ''}" data-filter="${f}">${f[0].toUpperCase() + f.slice(1)}</button>`).join('')}
+        </div>
+        <div class="library-list page">${this._libraryItems()}</div>
+      </div>`;
+  }
+
+  /* ── Sidebar ──────────────────────────────────────────────────────────── */
+
+  _libraryItems() {
+    const f = this.libraryFilter;
+    const v = this.view || {};
+    const items = [];
+
+    if (f !== 'artists') {
+      const liked = this._likedPlaylist();
+      items.push({ nav: 'liked', ctx: 'liked', active: v.name === 'liked', art: this._cover(liked, 'lib-img'), name: 'Liked Songs', meta: `Playlist • ${plural(liked.trackIds.length, 'song')}` });
+      for (const pl of this._allPlaylists()) {
+        items.push({
+          nav: 'playlist', id: pl.id, ctx: `playlist:${pl.id}`, active: v.name === 'playlist' && v.param === pl.id,
+          art: this._cover(pl, 'lib-img'), name: pl.title, meta: `Playlist • ${pl.id.startsWith('custom-') ? 'You' : 'AuraStream'}`
+        });
+      }
+    }
+    if (f !== 'playlists') {
+      for (const name of StorageService.getFollowedArtists()) {
+        if (!ARTIST_DATA[name]) continue;
+        items.push({
+          nav: 'artist', id: name, ctx: `artist:${name}`, active: v.name === 'artist' && v.param === name,
+          art: `<img class="lib-img round" src="${ARTIST_DATA[name].photo}" alt="" loading="lazy">`, name, meta: 'Artist'
         });
       }
     }
 
-    stack.appendChild(toast);
-    const duration = options.duration || (options.undoAction ? 4500 : 2800);
-    setTimeout(() => {
-      toast.style.opacity   = '0';
-      toast.style.transform = 'translateY(8px)';
-      toast.style.transition = 'all 0.3s ease';
-      setTimeout(() => toast.remove(), 300);
-    }, duration);
+    if (!items.length) {
+      return `<div class="lib-empty"><p class="lib-empty-title">Follow your first artist</p><p>Artists you follow will appear here.</p></div>`;
+    }
+
+    return items.map(it => `
+      <button class="lib-item ${it.active ? 'active' : ''}" data-nav="${it.nav}" ${it.id ? `data-id="${esc(it.id)}"` : ''} data-context-id="${esc(it.ctx)}">
+        ${it.art}
+        <span class="lib-text"><span class="lib-name">${esc(it.name)}</span><span class="lib-meta">${esc(it.meta)}</span></span>
+        <span class="lib-speaker">${icon('volume', 16)}</span>
+      </button>`).join('');
   }
 
-  /* ── Helpers ──────────────────────────────────────────────────────────────── */
-  _formatTime(seconds) {
-    if (!Number.isFinite(seconds)) return '0:00';
-    const m = Math.floor(seconds / 60);
-    const s = Math.floor(seconds % 60);
-    return `${m}:${s < 10 ? '0' : ''}${s}`;
+  _renderSidebar() {
+    this.sidebarList.innerHTML = this._libraryItems();
+    if (this.view?.name === 'library') {
+      const list = this.stage.querySelector('.library-list.page');
+      if (list) list.innerHTML = this._libraryItems();
+    }
+    this._refreshPlayingState();
+  }
+
+  /* ── Right panel ──────────────────────────────────────────────────────── */
+
+  togglePanel(tab) {
+    this.panelTab = tab && this.panelTab !== tab ? tab : null;
+    this._renderPanel();
+  }
+
+  showPanel(tab) {
+    this.panelTab = tab;
+    this._renderPanel();
+  }
+
+  _renderPanel() {
+    const tab = this.panelTab;
+    this.rightPanel.classList.toggle('hidden', !tab);
+    document.querySelectorAll('[data-panel]').forEach(b => b.classList.toggle('active', b.dataset.panel === tab));
+    document.querySelectorAll('.panel-tab').forEach(b => b.setAttribute('aria-selected', b.dataset.panel === tab));
+    if (!tab) return;
+    const scroll = this._renderedTab === tab ? this.drawer.scrollTop : 0;
+    this._renderedTab = tab;
+    ({
+      nowplaying: () => this._renderNowPlaying(),
+      queue: () => this._renderQueue(),
+      lyrics: () => this._renderLyrics(),
+      eq: () => this._renderEq()
+    })[tab]();
+    if (tab !== 'lyrics') this.drawer.scrollTop = scroll;
+  }
+
+  _renderNowPlaying() {
+    const t = this.player.currentTrack;
+    if (!t) { this.drawer.innerHTML = this._empty('music', 'Nothing playing', 'Pick a song to get started.'); return; }
+    const info = ARTIST_DATA[t.artist];
+    const next = this.player.queue[this.player.queueIndex + 1];
+
+    this.drawer.innerHTML = `
+      <div class="np">
+        <img class="np-art" src="${t.coverUrl}" alt="${esc(t.title)} cover">
+        <div class="np-head">
+          <div class="np-text">
+            <h3 class="np-title">${esc(t.title)}</h3>
+            <button class="link np-artist" data-nav="artist" data-id="${esc(t.artist)}">${esc(t.artist)}</button>
+          </div>
+          ${this._likeBtn(t.id, 22)}
+        </div>
+        <div class="tags"><span class="tag">${esc(t.genre)}</span><span class="tag">${esc(t.mood)}</span><span class="tag">${t.bpm} BPM</span></div>
+
+        ${info ? `
+          <div class="np-card artist-card">
+            <div class="artist-card-banner" style="background-image:url('${info.photo}')"><span>About the artist</span></div>
+            <div class="np-card-body">
+              <div class="artist-card-name">${esc(t.artist)}</div>
+              <div class="artist-card-row"><span class="muted">${esc(info.listeners)}</span>${this._followBtn(t.artist)}</div>
+              <p class="artist-card-bio">${esc(info.bio)}</p>
+            </div>
+          </div>` : ''}
+
+        ${next ? `
+          <div class="np-card">
+            <div class="np-card-head"><span>Next in queue</span><button class="link" data-panel="queue">Open queue</button></div>
+            <div class="q-row" data-action="queue-play" tabindex="0" data-index="${this.player.queueIndex + 1}">
+              <img class="q-art" src="${next.coverUrl}" alt="">
+              <div class="q-text"><div class="q-title">${esc(next.title)}</div><div class="q-artist">${esc(next.artist)}</div></div>
+              <span class="q-time">${formatTime(next.duration)}</span>
+            </div>
+          </div>` : ''}
+
+        <div class="np-card">
+          <div class="np-card-head"><span>Credits</span></div>
+          <div class="credit"><span>${esc(t.artist)}</span><span class="muted">Main artist</span></div>
+          <div class="credit"><span>${esc(t.album || t.title)}</span><span class="muted">Release</span></div>
+          <div class="credit"><span>${esc(t.license || 'Creative Commons')}</span><span class="muted">License</span></div>
+        </div>
+      </div>`;
+  }
+
+  _renderQueue() {
+    const { queue, queueIndex, currentTrack: cur } = this.player;
+    const upcoming = queue.slice(queueIndex + 1);
+    const total = upcoming.reduce((s, t) => s + t.duration, 0);
+    const row = (t, i, current = false) => `
+      <div class="q-row ${current ? 'current' : ''}" ${current ? '' : `data-action="queue-play" tabindex="0" data-index="${i}"`}>
+        <img class="q-art" src="${t.coverUrl}" alt="">
+        <div class="q-text"><div class="q-title">${esc(t.title)}</div><div class="q-artist">${esc(t.artist)}</div></div>
+        ${current ? `<span class="q-time">${formatTime(t.duration)}</span>` : `
+          <div class="q-actions">
+            <button class="icon-btn" data-action="queue-up" data-index="${i}" aria-label="Move up" ${i === queueIndex + 1 ? 'disabled' : ''}>${icon('arrow-up', 15)}</button>
+            <button class="icon-btn" data-action="queue-down" data-index="${i}" aria-label="Move down" ${i === queue.length - 1 ? 'disabled' : ''}>${icon('arrow-down', 15)}</button>
+            <button class="icon-btn" data-action="queue-remove" data-index="${i}" aria-label="Remove from queue">${icon('x', 15)}</button>
+          </div>
+          <span class="q-time">${formatTime(t.duration)}</span>`}
+      </div>`;
+
+    this.drawer.innerHTML = `
+      ${cur ? `<h4 class="panel-label">Now playing</h4>${row(cur, queueIndex, true)}` : ''}
+      <div class="panel-label-row">
+        <div><h4 class="panel-label">Next up</h4><span class="muted small">${plural(upcoming.length, 'song')}${upcoming.length ? ` · ${formatTotal(total)}` : ''}</span></div>
+        ${upcoming.length ? `
+          <div class="panel-label-actions">
+            <button class="icon-btn" data-action="save-queue" title="Save queue as playlist" aria-label="Save queue as playlist">${icon('save', 16)}</button>
+            <button class="btn btn-ghost sm" data-action="clear-queue">Clear</button>
+          </div>` : ''}
+      </div>
+      ${upcoming.length
+        ? upcoming.map((t, i) => row(t, queueIndex + 1 + i)).join('')
+        : this._empty('queue', 'Your queue is empty', 'Use "Add to queue" from any song\'s ••• menu.')}`;
+  }
+
+  _renderLyrics() {
+    const t = this.player.currentTrack;
+    if (!t?.lyrics?.length) {
+      this.drawer.innerHTML = this._empty('lyrics', 'No lyrics for this song', "You'll have to guess the words for this one.");
+      return;
+    }
+    this.drawer.innerHTML = `
+      <div class="lyrics" style="--lyrics-bg:${t.color}">
+        ${t.lyrics.map(l => `<button class="lyric ${l.text.startsWith('♪') ? 'instrumental' : ''}" data-action="seek-lyric" data-time="${l.time}">${esc(l.text)}</button>`).join('')}
+      </div>`;
+    this._syncLyrics(this.drawer, this.player.audio.currentTime, true);
+  }
+
+  /** Highlight the active lyric and keep it centred in `scroller` (only scrolls when the line changes). */
+  _syncLyrics(scroller, time, force = false) {
+    if (!scroller) return;
+    const lines = scroller.querySelectorAll('.lyric');
+    let active = -1;
+    lines.forEach((el, i) => { if (time >= Number(el.dataset.time)) active = i; });
+    if (!force && String(active) === scroller.dataset.activeLyric) return;
+    scroller.dataset.activeLyric = active;
+    lines.forEach((el, i) => {
+      el.classList.toggle('active', i === active);
+      el.classList.toggle('past', i < active);
+    });
+    const el = lines[active];
+    if (el) {
+      const top = el.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+      scroller.scrollTo({ top: top - scroller.clientHeight / 2 + el.offsetHeight / 2, behavior: force ? 'auto' : 'smooth' });
+    }
+  }
+
+  _renderEq() {
+    const p = this.player;
+    const fmtDb = v => `${v > 0 ? '+' : ''}${v} dB`;
+    this.drawer.innerHTML = `
+      <div class="eq">
+        <h4 class="panel-label">Equalizer</h4>
+        <div class="chip-row wrap">
+          ${Object.entries(EQ_PRESETS).map(([key, pr]) => `<button class="chip ${p.activePreset === key ? 'active' : ''}" data-action="eq-preset" data-preset="${key}">${pr.name}</button>`).join('')}
+        </div>
+        <div class="eq-bands">
+          ${EQ_BANDS.map((b, i) => `
+            <div class="eq-band">
+              <span class="eq-val">${fmtDb(p.eqBands[i])}</span>
+              <input class="eq-range" type="range" min="-12" max="12" step="1" value="${p.eqBands[i]}" data-band="${i}" aria-label="${b.label} (${b.hz})">
+              <span class="eq-label">${b.label}</span>
+              <span class="eq-hz">${b.hz}</span>
+            </div>`).join('')}
+        </div>
+        <h4 class="panel-label">Playback speed</h4>
+        <div class="chip-row">
+          ${[0.75, 1, 1.25, 1.5, 2].map(s => `<button class="chip ${p.playbackRate === s ? 'active' : ''}" data-action="speed" data-speed="${s}">${s}×</button>`).join('')}
+        </div>
+        <p class="muted small eq-note">Processed in your browser with Web Audio filters. Settings are saved on this device.</p>
+      </div>`;
+  }
+
+  /* ── Full-screen player ───────────────────────────────────────────────── */
+
+  openTheater() {
+    if (!this.player.currentTrack) return;
+    this.theaterOpen = true;
+    this._renderTheater();
+    this.theater.classList.add('open');
+    this.theater.setAttribute('aria-hidden', 'false');
+    this.theater.requestFullscreen?.().catch(() => { /* overlay still works without the Fullscreen API */ });
+  }
+
+  closeTheater() {
+    this.theaterOpen = false;
+    this.theater.classList.remove('open');
+    this.theater.setAttribute('aria-hidden', 'true');
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  }
+
+  _renderTheater() {
+    const t = this.player.currentTrack;
+    const playing = this.player.isPlaying;
+    this.theater.innerHTML = `
+      <div class="theater-bg" style="background-image:url('${t.coverUrl}')"></div>
+      <button class="icon-btn round theater-close" data-action="close-theater" aria-label="Exit full screen">${icon('minimize', 20)}</button>
+      <div class="theater-body">
+        <div class="theater-now">
+          <img class="theater-art" src="${t.coverUrl}" alt="${esc(t.title)} cover">
+          <div class="theater-title">${esc(t.title)}</div>
+          <button class="link theater-artist" data-nav="artist" data-id="${esc(t.artist)}">${esc(t.artist)}</button>
+        </div>
+        <div class="theater-lyrics">
+          ${t.lyrics?.length
+            ? t.lyrics.map(l => `<button class="lyric ${l.text.startsWith('♪') ? 'instrumental' : ''}" data-action="seek-lyric" data-time="${l.time}">${esc(l.text)}</button>`).join('')
+            : `<p class="theater-desc">${esc(t.description || '')}</p>`}
+        </div>
+      </div>
+      <div class="theater-controls">
+        <div class="player-progress">
+          <span class="time t-cur">0:00</span>
+          <input class="range progress-range" type="range" min="0" max="1000" value="0" aria-label="Seek">
+          <span class="time t-total">${formatTime(t.duration)}</span>
+        </div>
+        <div class="player-controls">
+          ${this._likeBtn(t.id, 22)}
+          <button class="icon-btn ctrl" data-action="prev" aria-label="Previous">${icon('prev', 24)}</button>
+          <button class="play-btn lg" data-action="toggle-play" aria-label="${playing ? 'Pause' : 'Play'}">${icon(playing ? 'pause' : 'play', 24)}</button>
+          <button class="icon-btn ctrl" data-action="next" aria-label="Next">${icon('next', 24)}</button>
+          <button class="icon-btn ctrl" data-action="close-theater" aria-label="Exit full screen">${icon('minimize', 22)}</button>
+        </div>
+      </div>`;
+    this._bindSeekRange(this.theater.querySelector('.progress-range'), this.theater.querySelector('.t-cur'));
+    this._updateProgress(this.player.audio.currentTime, this._duration());
+    this._syncLyrics(this.theater.querySelector('.theater-lyrics'), this.player.audio.currentTime, true);
+  }
+
+  /* ── Toasts ───────────────────────────────────────────────────────────── */
+
+  toast(message, { undo } = {}) {
+    const stack = document.getElementById('toast-stack');
+    const el = document.createElement('div');
+    el.className = 'toast';
+    el.innerHTML = `<span>${esc(message)}</span>${undo ? '<button class="toast-undo">Undo</button>' : ''}`;
+    const dismiss = () => {
+      el.classList.remove('show');
+      setTimeout(() => el.remove(), 200);
+    };
+    if (undo) {
+      el.querySelector('.toast-undo').addEventListener('click', () => { undo(); dismiss(); });
+    }
+    while (stack.children.length >= 3) stack.firstElementChild.remove();
+    stack.append(el);
+    requestAnimationFrame(() => el.classList.add('show'));
+    setTimeout(dismiss, undo ? 5000 : 2600);
   }
 }
 
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', () => new AuraStreamApp());
-} else {
-  new AuraStreamApp();
-}
+new AuraStreamApp();

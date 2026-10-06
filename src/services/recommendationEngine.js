@@ -111,7 +111,7 @@ export class RecommendationEngine {
    * Get recommendations for a specific track
    */
   static getRecommendationsForTrack(currentTrack, catalog, dial = 45, limit = 5) {
-    if (!currentTrack) return catalog.slice(0, limit);
+    if (!currentTrack) return [];
 
     const scored = catalog
       .filter(t => t.id !== currentTrack.id)

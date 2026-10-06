@@ -110,8 +110,9 @@ export class AudioVisualizer {
   }
 
   _renderSpectrumBars(c1, c2, isPlaying) {
-    const barCount = 36;
-    const padding = 3;
+    // Scale bar count to the canvas so the compact player-bar meter isn't clipped
+    const padding = this.width < 120 ? 2 : 3;
+    const barCount = Math.max(6, Math.min(36, Math.floor(this.width / (padding + 3))));
     const totalPadding = (barCount - 1) * padding;
     const barWidth = Math.max(2, (this.width - totalPadding) / barCount);
     const maxHeight = this.height * 0.88;

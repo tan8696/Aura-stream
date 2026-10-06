@@ -2,372 +2,175 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AuraStream — Hear Everything</title>
-  <meta name="description" content="AuraStream: A premium music experience with open-source tracks, AI recommendations, and studio-grade audio tools.">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><defs><linearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'><stop offset='0%25' stop-color='%237928CA'/><stop offset='100%25' stop-color='%2300F2FE'/></linearGradient></defs><circle cx='50' cy='50' r='48' fill='url(%23g)'/><text x='50' y='67' font-family='Arial Black' font-weight='900' font-size='52' fill='white' text-anchor='middle'>A</text></svg>" />
-  <link rel="stylesheet" href="/src/index.css" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>AuraStream</title>
+  <meta name="description" content="AuraStream — a music player with open-source tracks, explainable recommendations, synced lyrics and a studio EQ." />
+  <meta name="theme-color" content="#000000" />
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><circle cx='12' cy='12' r='11' fill='%231ed760'/><rect x='6.5' y='9' width='2' height='6' rx='1'/><rect x='11' y='6' width='2' height='12' rx='1'/><rect x='15.5' y='8' width='2' height='8' rx='1'/></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" />
 </head>
 <body>
 
-<!-- Spotify Auth Overlay -->
-<div class="auth-overlay" id="spotify-auth-overlay" style="display: none; position: fixed; inset: 0; background: var(--bg-surface); z-index: 10000; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 24px; text-align: center; padding: 24px;">
-  <div style="max-width: 400px; background: rgba(255,255,255,0.05); padding: 40px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.1);">
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#1DB954" width="64" height="64" style="margin-bottom: 24px;">
-      <path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.241 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.84.241 1.2zM20.16 9.72c-3.96-2.34-10.44-2.52-14.22-1.38-.6.18-1.2-.12-1.38-.66-.18-.6.12-1.2.66-1.38 4.38-1.26 11.46-1.02 15.9 1.62.54.3.72 1.02.42 1.56-.24.48-.9.72-1.38.24z"/>
-    </svg>
-    <h1 style="margin: 0 0 12px 0; font-size: 28px;">Connect to Spotify</h1>
-    <p style="color: var(--text-muted); margin-bottom: 32px; font-size: 14px; line-height: 1.5;">AuraStream is a fully functional Spotify client. Please enter your Spotify Client ID to continue. You must have Spotify Premium for playback.</p>
-    
-    <div style="text-align: left; margin-bottom: 24px;">
-      <label style="display: block; font-size: 12px; font-weight: bold; margin-bottom: 8px; color: var(--text-muted);">SPOTIFY CLIENT ID</label>
-      <input type="text" id="spotify-client-id-input" placeholder="e.g. 1a2b3c4d5e6f7g8h9i0j" style="width: 100%; padding: 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.5); color: white; font-family: monospace; outline: none; box-sizing: border-box;" />
-      <div style="font-size: 11px; color: var(--text-muted); margin-top: 8px;">Don't have one? Get it from the <a href="https://developer.spotify.com/dashboard" target="_blank" style="color: #1DB954; text-decoration: none;">Spotify Developer Dashboard</a>. Make sure to add <code style="background: rgba(255,255,255,0.1); padding: 2px 4px; border-radius: 4px;" id="current-url-display"></code> to your Redirect URIs.</div>
-    </div>
+<div class="app" id="app">
 
-    <button id="btn-spotify-login" style="background: #1DB954; color: #000; border: none; padding: 14px 32px; border-radius: 32px; font-weight: 700; font-size: 16px; cursor: pointer; width: 100%; transition: transform 0.2s, background 0.2s;">
-      Login with Spotify
-    </button>
-  </div>
-</div>
-
-<!-- Ambient Glow Backdrop -->
-<div class="app-ambient-backdrop" id="ambient-backdrop"></div>
-
-<!-- ════════════════════════════════════════════════════════════════════════
-     APP SHELL
-     ════════════════════════════════════════════════════════════════════════ -->
-<div id="app">
-
-  <!-- ── TOP BAR ─────────────────────────────────────────────────────────── -->
+  <!-- Top bar -->
   <header class="topbar">
-    <!-- Left: Nav Arrows -->
-    <div class="topbar-nav-arrows">
-      <button class="btn-nav-arrow" id="btn-nav-back" aria-label="Go back" disabled>
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
-      </button>
-      <button class="btn-nav-arrow" id="btn-nav-forward" aria-label="Go forward" disabled>
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
-      </button>
+    <button class="brand" data-nav="home" aria-label="AuraStream home">
+      <i data-icon="logo" data-size="30" class="brand-mark"></i>
+      <span class="brand-name">AuraStream</span>
+    </button>
+
+    <div class="topbar-history">
+      <button class="icon-btn round" id="btn-nav-back" aria-label="Go back" disabled><i data-icon="chevron-left"></i></button>
+      <button class="icon-btn round" id="btn-nav-forward" aria-label="Go forward" disabled><i data-icon="chevron-right"></i></button>
     </div>
 
-    <!-- Center: Search -->
-    <div class="topbar-search-area">
-      <div class="search-box">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-        <input class="search-input" id="omnibox-search" type="text" placeholder="What do you want to listen to?" autocomplete="off" />
-        <button id="search-clear-btn" class="btn-search-browse" aria-label="Browse">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
-        </button>
-      </div>
+    <div class="topbar-center">
+      <button class="home-btn" data-nav="home" aria-label="Home" title="Home"><i data-icon="home" data-size="22"></i></button>
+      <label class="search-box">
+        <i data-icon="search" data-size="20"></i>
+        <input id="omnibox-search" type="search" placeholder="What do you want to play?" autocomplete="off" spellcheck="false" aria-label="Search songs, artists and moods" />
+        <kbd class="search-kbd">/</kbd>
+      </label>
     </div>
 
-    <!-- Right: Focus Mode + Discovery Dial + User -->
-    <div class="topbar-user-area">
-      <!-- Focus Mode Badge (Music Only) -->
-      <button class="focus-mode-badge active" id="btn-focus-mode" title="Focus Mode: Tap to toggle between 'Music Only' (podcasts/audiobooks hidden) and 'All Media'" aria-label="Toggle Focus Mode">
-        <span class="focus-mode-dot"></span>
-        <span class="focus-mode-label">Music Only</span>
-      </button>
-
-      <!-- Discovery Dial (AuraStream unique) -->
-      <div class="topbar-dial-widget" title="Discovery Dial: controls how adventurous your recommendations are">
-        <span class="dial-label">✦ DIAL</span>
-        <input class="dial-range" id="discovery-dial-slider" type="range" min="0" max="100" value="40" aria-label="Discovery Dial" />
-        <span class="dial-value-badge" id="dial-mode-label">BLEND</span>
+    <div class="topbar-right">
+      <div class="dial" title="Discovery Dial: how adventurous your recommendations are">
+        <i data-icon="compass" data-size="18"></i>
+        <input class="range dial-range" id="discovery-dial-slider" type="range" min="0" max="100" aria-label="Discovery Dial" />
+        <span class="dial-value" id="dial-mode-label">Blend</span>
       </div>
-
-      <!-- Notification -->
-      <button class="topbar-icon-btn" aria-label="Notifications">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
-      </button>
-
-      <!-- User -->
-      <button class="user-avatar-btn" id="btn-user-avatar" aria-label="User menu">A</button>
     </div>
   </header>
 
-  <!-- ── WORKSPACE ──────────────────────────────────────────────────────── -->
-  <div class="workspace">
+  <!-- Library sidebar -->
+  <aside class="sidebar panel" id="sidebar" aria-label="Your Library">
+    <div class="library-header">
+      <button class="library-title" data-nav="library" title="Your Library"><i data-icon="library" data-size="22"></i><span class="library-title-text">Your Library</span></button>
+      <button class="icon-btn round" data-action="create-playlist" aria-label="Create playlist" title="Create playlist"><i data-icon="plus"></i></button>
+    </div>
+    <div class="chip-row" id="lib-filter-row" role="tablist">
+      <button class="chip active" data-filter="all" role="tab">All</button>
+      <button class="chip" data-filter="playlists" role="tab">Playlists</button>
+      <button class="chip" data-filter="artists" role="tab">Artists</button>
+    </div>
+    <div class="library-list" id="sidebar-library-list"></div>
+  </aside>
 
-    <!-- LEFT SIDEBAR -->
-    <aside class="sidebar" id="sidebar">
-      <!-- Library Header -->
-      <div class="library-header">
-        <button class="library-title-btn" id="btn-lib-title">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
-          Your Library
-        </button>
-        <div class="library-header-actions">
-          <button class="btn-lib-icon" id="btn-create-playlist" title="Create playlist">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-          </button>
-          <button class="btn-lib-icon" title="Expand">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></svg>
-          </button>
-        </div>
-      </div>
+  <!-- Main view -->
+  <main class="main panel" id="main-content">
+    <div id="stage-content"></div>
+  </main>
 
-      <!-- Filter Chips -->
-      <div class="library-filter-row" id="lib-filter-row">
-        <button class="filter-chip active" data-filter="all">Playlists</button>
-        <button class="filter-chip" data-filter="liked">Liked Songs</button>
-        <button class="filter-chip" data-filter="recent">Recently played</button>
-      </div>
+  <!-- Right panel: now playing / queue / lyrics / EQ -->
+  <aside class="right-panel panel hidden" id="right-panel" aria-label="Now playing details">
+    <div class="panel-tabs" role="tablist">
+      <button class="panel-tab" data-panel="nowplaying" role="tab">Now playing</button>
+      <button class="panel-tab" data-panel="queue" role="tab">Queue</button>
+      <button class="panel-tab" data-panel="lyrics" role="tab">Lyrics</button>
+      <button class="panel-tab" data-panel="eq" role="tab">EQ</button>
+      <button class="icon-btn round panel-close" id="btn-right-panel-close" aria-label="Close panel"><i data-icon="x" data-size="18"></i></button>
+    </div>
+    <div class="panel-body" id="right-drawer"></div>
+  </aside>
 
-      <!-- Library Search + Sort -->
-      <div class="library-search-row">
-        <button class="btn-lib-search" title="Search in library">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-        </button>
-        <button class="lib-recents-btn" title="Sort">
-          Recents
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="8 10 12 14 16 10"/></svg>
-        </button>
-      </div>
-
-      <!-- Playlist / Library Items List -->
-      <div class="library-list" id="sidebar-library-list">
-        <!-- Populated by JS -->
-      </div>
-    </aside>
-
-    <!-- MAIN CONTENT -->
-    <main class="main-content" id="main-content">
-      <!-- Sticky Nav (shows title when scrolled) -->
-      <div class="content-sticky-nav" id="content-sticky-nav">
-        <!-- populated by JS based on view -->
-      </div>
-      <!-- Content rendered by JS -->
-      <div id="stage-content"></div>
-    </main>
-
-    <!-- RIGHT PANEL -->
-    <aside class="right-panel" id="right-panel">
-      <!-- Tab Bar -->
-      <div class="panel-tabs">
-        <div class="panel-tab-group">
-          <button class="panel-tab active" id="panel-tab-queue" data-panel="queue">Queue</button>
-          <button class="panel-tab" id="panel-tab-nowplaying" data-panel="nowplaying">Now Playing</button>
-          <button class="panel-tab" id="panel-tab-lyrics" data-panel="lyrics">Lyrics</button>
-          <button class="panel-tab" id="panel-tab-eq" data-panel="eq">EQ</button>
-        </div>
-        <button class="panel-close-btn" id="btn-right-panel-close" title="Close panel">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        </button>
-      </div>
-      <!-- Panel body rendered by JS -->
-      <div class="panel-body" id="right-drawer">
-        <!-- Queue / Now Playing / Lyrics / EQ rendered here -->
-      </div>
-    </aside>
-
-  </div><!-- /workspace -->
-
-  <!-- ── PLAYER BAR ─────────────────────────────────────────────────────── -->
+  <!-- Player bar -->
   <footer class="player-bar" id="player-bar">
-
-    <!-- Left: Track Info -->
-    <div class="player-track-area">
-      <div class="player-thumb-wrap" id="player-thumb-wrap">
-        <img class="player-thumb" id="player-thumb" src="" alt="Now playing" />
-      </div>
+    <div class="player-track">
+      <button class="player-art-btn" id="player-thumb-wrap" aria-label="Show now playing">
+        <img class="player-art" id="player-thumb" alt="" />
+      </button>
       <div class="player-track-text">
-        <div class="player-track-title" id="player-track-title">—</div>
-        <div class="player-track-artist" id="player-track-artist">Select a track to play</div>
+        <div class="player-title" id="player-track-title"></div>
+        <button class="player-artist link" id="player-track-artist"></button>
       </div>
-      <button class="player-like-btn" id="player-like-btn" aria-label="Save to liked songs">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
-      </button>
+      <button class="icon-btn like-btn" id="player-like-btn" aria-label="Save to Liked Songs"><i data-icon="heart" data-size="18"></i></button>
     </div>
 
-    <!-- Center: Controls + Scrubber -->
-    <div class="player-controls-area">
-      <div class="player-btns-row">
-        <!-- Shuffle with Mode Indicator & Popover -->
-        <div class="shuffle-widget" id="shuffle-widget">
-          <button class="ctrl-btn" id="btn-shuffle" title="Click to cycle shuffle mode, or click badge to select" aria-label="Shuffle mode">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
-          </button>
-          <button class="shuffle-pill" id="shuffle-badge" title="Active shuffle mode (Click to change)">OFF</button>
-
-          <!-- Shuffle mode popover selector -->
-          <div class="shuffle-popover" id="shuffle-popover">
-            <div class="shuffle-popover-header">
-              <span>Shuffle Mode</span>
-              <span style="font-size:11px;color:var(--text-muted)">Clear & transparent</span>
-            </div>
-            <div class="shuffle-option active" data-shuffle-mode="off">
-              <div class="shuffle-opt-row">
-                <span class="shuffle-opt-name">Off (Sequential)</span>
-                <span class="shuffle-opt-tag">Active</span>
-              </div>
-              <p class="shuffle-opt-desc">Tracks play in the exact playlist or album sequence.</p>
-            </div>
-            <div class="shuffle-option" data-shuffle-mode="true-random">
-              <div class="shuffle-opt-row">
-                <span class="shuffle-opt-name">True Random</span>
-                <span class="shuffle-opt-tag tag-purple">Unbiased</span>
-              </div>
-              <p class="shuffle-opt-desc">Fisher-Yates randomization. Every track has an equal chance, with zero algorithmic bias or repeat loops.</p>
-            </div>
-            <div class="shuffle-option" data-shuffle-mode="smart-flow">
-              <div class="shuffle-opt-row">
-                <span class="shuffle-opt-name">Smart Flow</span>
-                <span class="shuffle-opt-tag tag-cyan">AI Harmony</span>
-              </div>
-              <p class="shuffle-opt-desc">Blends harmonically matching BPM, mood, and valence for seamless transitions without abrupt genre clashing.</p>
-            </div>
-          </div>
-        </div>
-        <!-- Prev -->
-        <button class="ctrl-btn" id="btn-prev" title="Previous">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6L20 18V6z"/></svg>
-        </button>
-        <!-- Play/Pause -->
-        <button class="ctrl-btn-play" id="btn-play-pause" aria-label="Play">
-          <svg id="icon-play" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-          <svg id="icon-pause" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" style="display:none"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-        </button>
-        <!-- Next -->
-        <button class="ctrl-btn" id="btn-next" title="Next">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
-        </button>
-        <!-- Repeat -->
-        <button class="ctrl-btn" id="btn-repeat" title="Enable repeat">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
-        </button>
+    <div class="player-center">
+      <div class="player-controls">
+        <button class="icon-btn ctrl" id="btn-shuffle" aria-label="Shuffle: off" title="Shuffle: off"><i data-icon="shuffle" data-size="18"></i></button>
+        <button class="icon-btn ctrl" id="btn-prev" aria-label="Previous" title="Previous"><i data-icon="prev" data-size="18"></i></button>
+        <button class="play-btn" id="btn-play-pause" aria-label="Play"><i data-icon="play" data-size="18"></i></button>
+        <button class="icon-btn ctrl" id="btn-next" aria-label="Next" title="Next"><i data-icon="next" data-size="18"></i></button>
+        <button class="icon-btn ctrl" id="btn-repeat" aria-label="Repeat: off" title="Repeat: off"><i data-icon="repeat" data-size="18"></i></button>
       </div>
-
-      <!-- Scrub Bar -->
-      <div class="player-scrub-row">
-        <span class="scrub-time" id="scrub-current">0:00</span>
-        <div class="scrub-wrapper" id="scrub-wrapper">
-          <div class="scrub-track">
-            <div class="scrub-fill" id="scrub-fill"></div>
-          </div>
-          <div class="scrub-thumb" id="scrub-thumb"></div>
-        </div>
-        <span class="scrub-time" id="scrub-total">0:00</span>
+      <div class="player-progress">
+        <span class="time" id="scrub-current">0:00</span>
+        <input class="range progress-range" id="scrub-range" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek" />
+        <span class="time" id="scrub-total">0:00</span>
       </div>
     </div>
 
-    <!-- Right: Extra Controls -->
-    <div class="player-extra-area">
-      <!-- Mini Visualizer -->
-      <canvas class="mini-visualizer" id="mini-visualizer" width="64" height="28" title="Click to cycle visualizer mode"></canvas>
-
-      <!-- Lyrics toggle -->
-      <button class="player-extra-btn" id="btn-panel-lyrics" title="Lyrics" aria-label="Lyrics">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-      </button>
-
-      <!-- Queue toggle -->
-      <button class="player-extra-btn" id="btn-panel-queue" title="Queue" aria-label="Queue">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
-      </button>
-
-      <!-- EQ toggle -->
-      <button class="player-extra-btn" id="btn-panel-eq" title="Equalizer" aria-label="Equalizer">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
-      </button>
-
-      <!-- Theater mode toggle -->
-      <button class="player-extra-btn" id="btn-theater" title="Full-screen theater" aria-label="Theater mode">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
-      </button>
-
-      <!-- Volume -->
-      <div class="volume-wrap">
-        <button class="player-extra-btn" id="btn-mute" title="Mute" aria-label="Mute">
-          <svg id="icon-volume" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
-          <svg id="icon-mute" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
-        </button>
-        <input class="volume-slider" id="volume-slider" type="range" min="0" max="100" value="80" aria-label="Volume" />
+    <div class="player-extra">
+      <canvas class="mini-visualizer" id="mini-visualizer" width="56" height="24" title="Visualizer: click to change style"></canvas>
+      <button class="icon-btn ctrl" id="btn-panel-nowplaying" data-panel="nowplaying" aria-label="Now playing view" title="Now playing view"><i data-icon="nowplaying" data-size="18"></i></button>
+      <button class="icon-btn ctrl" id="btn-panel-lyrics" data-panel="lyrics" aria-label="Lyrics" title="Lyrics"><i data-icon="lyrics" data-size="18"></i></button>
+      <button class="icon-btn ctrl" id="btn-panel-queue" data-panel="queue" aria-label="Queue" title="Queue"><i data-icon="queue" data-size="18"></i></button>
+      <button class="icon-btn ctrl" id="btn-panel-eq" data-panel="eq" aria-label="Equalizer" title="Equalizer"><i data-icon="eq" data-size="18"></i></button>
+      <div class="volume">
+        <button class="icon-btn ctrl" id="btn-mute" aria-label="Mute" title="Mute"></button>
+        <input class="range volume-range" id="volume-slider" type="range" min="0" max="100" aria-label="Volume" />
       </div>
+      <button class="icon-btn ctrl" id="btn-theater" aria-label="Full screen" title="Full screen"><i data-icon="maximize" data-size="18"></i></button>
     </div>
   </footer>
 
-</div><!-- /app -->
+  <!-- Mobile tab bar -->
+  <nav class="mobile-nav" aria-label="Primary">
+    <button class="mobile-nav-btn" data-nav="home"><i data-icon="home" data-size="22"></i><span>Home</span></button>
+    <button class="mobile-nav-btn" data-nav="search"><i data-icon="search" data-size="22"></i><span>Search</span></button>
+    <button class="mobile-nav-btn" data-nav="library"><i data-icon="library" data-size="22"></i><span>Your Library</span></button>
+  </nav>
+</div>
 
-<!-- Fullscreen Theater Overlay -->
-<div class="theater-overlay" id="fullscreen-theater"></div>
+<!-- Full-screen player -->
+<div class="theater" id="fullscreen-theater" aria-hidden="true"></div>
 
-<!-- Create Playlist Modal -->
+<!-- Create playlist dialog -->
 <div class="modal-overlay" id="create-playlist-modal">
-  <div class="modal-box">
+  <form class="modal" id="create-playlist-form" role="dialog" aria-modal="true" aria-labelledby="create-playlist-title">
     <div class="modal-header">
-      <h2 class="modal-title">Create playlist</h2>
-      <button class="modal-close-btn" id="modal-close-btn">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-      </button>
+      <h2 class="modal-title" id="create-playlist-title">Create playlist</h2>
+      <button type="button" class="icon-btn round" data-close-modal aria-label="Close"><i data-icon="x" data-size="18"></i></button>
     </div>
-    <div class="form-group">
-      <label class="form-label" for="playlist-name-input">Playlist name</label>
-      <input class="form-input" id="playlist-name-input" type="text" placeholder="My Playlist #1" maxlength="60" />
-    </div>
-    <div class="form-group">
-      <label class="form-label" for="playlist-desc-input">Description <span style="opacity:0.5">(optional)</span></label>
-      <input class="form-input" id="playlist-desc-input" type="text" placeholder="Add an optional description" maxlength="120" />
-    </div>
+    <label class="field">
+      <span class="field-label">Name</span>
+      <input class="input" id="playlist-name-input" type="text" placeholder="My Playlist #1" maxlength="60" required />
+    </label>
+    <label class="field">
+      <span class="field-label">Description <span class="muted">(optional)</span></span>
+      <input class="input" id="playlist-desc-input" type="text" placeholder="Add an optional description" maxlength="120" />
+    </label>
     <div class="modal-footer">
-      <button class="btn-cancel" id="modal-cancel-btn">Cancel</button>
-      <button class="btn-create" id="modal-save-btn">Create</button>
+      <button type="button" class="btn btn-ghost" data-close-modal>Cancel</button>
+      <button type="submit" class="btn btn-primary">Create</button>
     </div>
-  </div>
+  </form>
 </div>
 
-<!-- Explainability Modal: Why am I seeing this? -->
+<!-- Recommendation explainer dialog -->
 <div class="modal-overlay" id="explain-rec-modal">
-  <div class="modal-box modal-box-explain">
-    <div class="modal-header">
-      <div style="display:flex;align-items:center;gap:12px">
-        <div class="explain-icon-circle">✦</div>
-        <div>
-          <h2 class="modal-title">Why am I seeing this?</h2>
-          <div style="font-size:12px;color:var(--text-muted)">Algorithmic transparency breakdown</div>
-        </div>
-      </div>
-      <button class="modal-close-btn" id="explain-close-btn" aria-label="Close explanation">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-      </button>
-    </div>
-    <div class="modal-body" id="explain-body">
-      <!-- Injected by JS -->
-    </div>
-    <div class="modal-footer" style="justify-content:space-between">
-      <button class="btn-cancel" id="explain-not-interested-btn">Not interested in this type</button>
-      <button class="btn-create" id="explain-play-btn">Play track now</button>
-    </div>
-  </div>
-</div>
-
-<!-- Customize Home Sections Modal -->
-<div class="modal-overlay" id="customize-sections-modal">
-  <div class="modal-box modal-box-sections">
+  <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="explain-title">
     <div class="modal-header">
       <div>
-        <h2 class="modal-title">Customize Home Layout</h2>
-        <div style="font-size:12px;color:var(--text-muted)">Reorder, pin, or hide sections to match your personal workflow</div>
+        <h2 class="modal-title" id="explain-title">Why this recommendation?</h2>
+        <p class="modal-sub">Computed in your browser from open audio features. No tracking.</p>
       </div>
-      <button class="modal-close-btn" id="sections-close-btn" aria-label="Close customize modal">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-      </button>
+      <button type="button" class="icon-btn round" data-close-modal aria-label="Close"><i data-icon="x" data-size="18"></i></button>
     </div>
-    <div class="sections-manage-list" id="sections-manage-list">
-      <!-- Injected by JS -->
-    </div>
-    <div class="modal-footer" style="justify-content:space-between">
-      <button class="btn-cancel" id="sections-reset-btn">Reset to Default Order</button>
-      <button class="btn-create" id="sections-save-btn">Save Layout</button>
+    <div id="explain-body"></div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-ghost" data-close-modal>Close</button>
+      <button type="button" class="btn btn-primary" id="explain-play-btn">Play song</button>
     </div>
   </div>
 </div>
 
-<!-- Toast container with interactive Undo -->
-<div class="toast-stack" id="toast-stack"></div>
+<div class="menu" id="context-menu" role="menu" hidden></div>
+<div class="toast-stack" id="toast-stack" role="status" aria-live="polite"></div>
 
 <script type="module" src="/src/main.js"></script>
 </body>

@@ -10,10 +10,7 @@ const STORAGE_KEYS = {
   EQ_SETTINGS: 'aurastream_eq_settings',
   DISCOVERY_DIAL: 'aurastream_discovery_dial',
   VOLUME: 'aurastream_volume',
-  MUTED: 'aurastream_muted',
-  SHUFFLE_MODE: 'aurastream_shuffle_mode',
-  LOOP_MODE: 'aurastream_loop_mode',
-  DYNAMIC_AURA: 'aurastream_dynamic_aura'
+  FOLLOWED_ARTISTS: 'aurastream_followed_artists'
 };
 
 export class StorageService {
@@ -68,8 +65,7 @@ export class StorageService {
     const newPlaylist = {
       id: 'custom-' + Date.now(),
       title: title.trim() || 'My Favorite Mix',
-      description: description.trim() || 'Curated personal playlist',
-      coverUrl: '/covers/playlist-radar.svg',
+      description: description.trim(),
       trackIds: Array.from(new Set(trackIds)),
       createdAt: new Date().toISOString(),
       color: '#3B82F6'
@@ -131,19 +127,9 @@ export class StorageService {
   static getEqSettings() {
     try {
       const data = localStorage.getItem(STORAGE_KEYS.EQ_SETTINGS);
-      return data ? JSON.parse(data) : {
-        preset: 'electronic',
-        bands: [4, 2, 0, 3, 5],
-        spatial3D: true,
-        playbackSpeed: 1.0
-      };
+      return data ? JSON.parse(data) : { preset: 'flat', bands: [0, 0, 0, 0, 0] };
     } catch {
-      return {
-        preset: 'electronic',
-        bands: [4, 2, 0, 3, 5],
-        spatial3D: true,
-        playbackSpeed: 1.0
-      };
+      return { preset: 'flat', bands: [0, 0, 0, 0, 0] };
     }
   }
 
@@ -187,95 +173,22 @@ export class StorageService {
     } catch {}
   }
 
-  /* ── User-Centric Home & Library Preferences ── */
-  static getHomeMode() {
+  static getFollowedArtists() {
     try {
-      return localStorage.getItem('aurastream_home_mode') || 'my-music';
-    } catch {
-      return 'my-music';
-    }
-  }
-
-  static saveHomeMode(mode) {
-    try {
-      localStorage.setItem('aurastream_home_mode', mode);
-    } catch {}
-  }
-
-  static getHiddenSections() {
-    try {
-      const d = localStorage.getItem('aurastream_hidden_sections');
-      return d ? new Set(JSON.parse(d)) : new Set();
+      const data = localStorage.getItem(STORAGE_KEYS.FOLLOWED_ARTISTS);
+      return new Set(data ? JSON.parse(data) : []);
     } catch {
       return new Set();
     }
   }
 
-  static toggleHideSection(sectionId) {
-    const hidden = this.getHiddenSections();
-    if (hidden.has(sectionId)) {
-      hidden.delete(sectionId);
-    } else {
-      hidden.add(sectionId);
-    }
+  static toggleFollowArtist(name) {
+    const set = this.getFollowedArtists();
+    if (set.has(name)) set.delete(name);
+    else set.add(name);
     try {
-      localStorage.setItem('aurastream_hidden_sections', JSON.stringify(Array.from(hidden)));
+      localStorage.setItem(STORAGE_KEYS.FOLLOWED_ARTISTS, JSON.stringify([...set]));
     } catch {}
-    return hidden.has(sectionId);
-  }
-
-  static unhideAllSections() {
-    try {
-      localStorage.removeItem('aurastream_hidden_sections');
-    } catch {}
-  }
-
-  static getSectionOrder(mode = 'my-music') {
-    try {
-      const d = localStorage.getItem(`aurastream_section_order_${mode}`);
-      return d ? JSON.parse(d) : null;
-    } catch {
-      return null;
-    }
-  }
-
-  static saveSectionOrder(mode, order) {
-    try {
-      localStorage.setItem(`aurastream_section_order_${mode}`, JSON.stringify(order));
-    } catch {}
-  }
-
-  static getExcludedPlaylists() {
-    try {
-      const d = localStorage.getItem('aurastream_excluded_playlists');
-      return d ? new Set(JSON.parse(d)) : new Set();
-    } catch {
-      return new Set();
-    }
-  }
-
-  static toggleExcludePlaylist(playlistId) {
-    const s = this.getExcludedPlaylists();
-    const isExcluded = s.has(playlistId);
-    if (isExcluded) s.delete(playlistId);
-    else s.add(playlistId);
-    try {
-      localStorage.setItem('aurastream_excluded_playlists', JSON.stringify(Array.from(s)));
-    } catch {}
-    return !isExcluded;
-  }
-
-  static getFocusMode() {
-    try {
-      return localStorage.getItem('aurastream_focus_mode') || 'music';
-    } catch {
-      return 'music';
-    }
-  }
-
-  static saveFocusMode(mode) {
-    try {
-      localStorage.setItem('aurastream_focus_mode', mode);
-    } catch {}
+    return set.has(name);
   }
 }

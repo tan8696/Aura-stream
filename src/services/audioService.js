@@ -1,39 +1,41 @@
 /**
  * Audio Service for AuraStream
- * Full Web Audio API Pipeline with 5-Band EQ, 3D Spatial Panner, Real-Time Analyser,
- * True Fisher-Yates Random Shuffle, and Smart Queue Management.
+ * HTML5 audio + Web Audio pipeline (5-band EQ, analyser), shuffle modes and queue management.
  */
 
 import { StorageService } from './storageService.js';
 import { RecommendationEngine } from './recommendationEngine.js';
 
 export const EQ_PRESETS = {
-  flat: { name: 'Flat', bands: [0, 0, 0, 0, 0] },
+  flat:       { name: 'Flat',       bands: [0, 0, 0, 0, 0] },
   bass_boost: { name: 'Bass Boost', bands: [8, 5, 1, 0, -1] },
-  vocal: { name: 'Vocal Clarity', bands: [-2, 1, 4, 3, 2] },
-  acoustic: { name: 'Acoustic Warmth', bands: [3, 2, 0, 2, 4] },
-  electronic: { name: 'Electronic Club', bands: [6, 3, -1, 4, 6] },
-  rock: { name: 'Rock Drive', bands: [5, 3, -2, 4, 5] }
+  vocal:      { name: 'Vocal',      bands: [-2, 1, 4, 3, 2] },
+  acoustic:   { name: 'Acoustic',   bands: [3, 2, 0, 2, 4] },
+  electronic: { name: 'Electronic', bands: [6, 3, -1, 4, 6] },
+  rock:       { name: 'Rock',       bands: [5, 3, -2, 4, 5] }
 };
+
+export const EQ_BANDS = [
+  { label: 'Bass',    hz: '60 Hz',  freq: 60,    type: 'lowshelf' },
+  { label: 'Low-mid', hz: '250 Hz', freq: 250,   type: 'peaking' },
+  { label: 'Mid',     hz: '1 kHz',  freq: 1000,  type: 'peaking' },
+  { label: 'Hi-mid',  hz: '4 kHz',  freq: 4000,  type: 'peaking' },
+  { label: 'Treble',  hz: '16 kHz', freq: 16000, type: 'highshelf' }
+];
 
 export class AudioService {
   constructor(catalog = []) {
     this.catalog = catalog;
 
-    // Core HTML5 audio element
     this.audio = new Audio();
     this.audio.crossOrigin = 'anonymous';
     this.audio.preload = 'auto';
 
-    // Web Audio API context & nodes
+    // Web Audio graph is created lazily on first user gesture (autoplay policy)
     this.audioCtx = null;
-    this.sourceNode = null;
     this.analyserNode = null;
-    this.gainNode = null;
-    this.pannerNode = null;
-    this.eqNodes = []; // 5 BiquadFilterNodes
+    this.eqNodes = [];
 
-    // Playback state
     this.currentTrack = null;
     this.queue = [];
     this.queueIndex = -1;
@@ -42,95 +44,54 @@ export class AudioService {
     this.isMuted = false;
     this.volume = StorageService.getVolume();
     this.audio.volume = this.volume;
-    this.playbackRate = 1.0;
+    this.playbackRate = 1;
 
-    // Modes
     this.shuffleMode = 'off'; // 'off' | 'true-random' | 'smart-flow'
-    this.loopMode = 'all';     // 'off' | 'all' | 'one'
-    this.spatial3DEnabled = true;
+    this.loopMode = 'off';    // 'off' | 'all' | 'one'
 
-    // A-B Looping
-    this.abLoop = { enabled: false, start: 0, end: 0 };
-
-    // Saved EQ settings
     const savedEq = StorageService.getEqSettings();
-    this.eqBands = savedEq.bands || [4, 2, 0, 3, 5];
-    this.activePreset = savedEq.preset || 'electronic';
-    this.spatial3DEnabled = savedEq.spatial3D !== undefined ? savedEq.spatial3D : true;
+    this.eqBands = savedEq.bands || [0, 0, 0, 0, 0];
+    this.activePreset = savedEq.preset || 'flat';
 
-    // Event listeners callback dictionary
-    this.listeners = {
-      trackchange: [],
-      playstate: [],
-      timeupdate: [],
-      queuechange: [],
-      modechange: [],
-      eqchange: []
-    };
-
+    this.listeners = {};
     this._bindAudioEvents();
   }
 
-  /**
-   * Lazily initialize Web Audio API on first user interaction
-   */
   initWebAudio() {
     if (this.audioCtx) return;
-
     try {
-      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-      this.audioCtx = new AudioContextClass();
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      this.audioCtx = new Ctx();
 
-      // Create analyser node
       this.analyserNode = this.audioCtx.createAnalyser();
       this.analyserNode.fftSize = 512;
       this.analyserNode.smoothingTimeConstant = 0.82;
 
-      // Create Gain node
-      this.gainNode = this.audioCtx.createGain();
-
-      // Create Spatial Stereo Panner node
-      if (this.audioCtx.createStereoPanner) {
-        this.pannerNode = this.audioCtx.createStereoPanner();
-        this.pannerNode.pan.value = 0;
-      }
-
-      // Create 5-Band BiquadFilter Equalizer
-      // Bands: 60Hz (lowshelf), 250Hz (peaking), 1000Hz (peaking), 4000Hz (peaking), 16000Hz (highshelf)
-      const frequencies = [60, 250, 1000, 4000, 16000];
-      const types = ['lowshelf', 'peaking', 'peaking', 'peaking', 'highshelf'];
-
-      this.eqNodes = frequencies.map((freq, idx) => {
+      this.eqNodes = EQ_BANDS.map((band, i) => {
         const filter = this.audioCtx.createBiquadFilter();
-        filter.type = types[idx];
-        filter.frequency.value = freq;
-        filter.Q.value = 1.0;
-        filter.gain.value = this.eqBands[idx] || 0;
+        filter.type = band.type;
+        filter.frequency.value = band.freq;
+        filter.Q.value = 1;
+        filter.gain.value = this.eqBands[i] || 0;
         return filter;
       });
 
-      // Connect MediaElementSource through nodes chain
-      this.sourceNode = this.audioCtx.createMediaElementSource(this.audio);
-
-      let prevNode = this.sourceNode;
+      let node = this.audioCtx.createMediaElementSource(this.audio);
       for (const filter of this.eqNodes) {
-        prevNode.connect(filter);
-        prevNode = filter;
+        node.connect(filter);
+        node = filter;
       }
-
-      if (this.pannerNode) {
-        prevNode.connect(this.pannerNode);
-        prevNode = this.pannerNode;
-      }
-
-      prevNode.connect(this.analyserNode);
-      this.analyserNode.connect(this.gainNode);
-      this.gainNode.connect(this.audioCtx.destination);
-
-      console.log('AuraStream Web Audio API initialized successfully');
+      node.connect(this.analyserNode);
+      this.analyserNode.connect(this.audioCtx.destination);
     } catch (err) {
-      console.warn('Web Audio API not supported or blocked by browser policy:', err);
+      console.warn('Web Audio API unavailable, EQ and visualizer disabled:', err);
     }
+  }
+
+  _resumeContext() {
+    this.initWebAudio();
+    // Not awaited: resume() can stay pending without a user gesture (e.g. media keys), which must not block playback
+    if (this.audioCtx?.state === 'suspended') this.audioCtx.resume().catch(() => {});
   }
 
   _bindAudioEvents() {
@@ -145,12 +106,9 @@ export class AudioService {
     });
 
     this.audio.addEventListener('timeupdate', () => {
-      if (this.abLoop.enabled && this.audio.currentTime >= this.abLoop.end) {
-        this.audio.currentTime = this.abLoop.start;
-      }
       this._emit('timeupdate', {
         currentTime: this.audio.currentTime,
-        duration: this.audio.duration || 0
+        duration: this.audio.duration || this.currentTrack?.duration || 0
       });
     });
 
@@ -159,28 +117,35 @@ export class AudioService {
         this.audio.currentTime = 0;
         this.audio.play();
       } else {
-        this.playNext(false); // auto advance
+        this.playNext(false);
       }
     });
 
-    this.audio.addEventListener('error', (e) => {
-      console.warn('Audio playback error on track:', this.currentTrack?.title, e);
-      // If error occurs, advance to next track after short pause
-      setTimeout(() => {
-        if (this.isPlaying) this.playNext(false);
-      }, 1500);
+    this.audio.addEventListener('error', () => {
+      if (!this.audio.src) return;
+      console.warn('Audio playback error on track:', this.currentTrack?.title);
+      this._emit('error', { track: this.currentTrack });
     });
   }
 
-  /**
-   * Play a specific track
-   */
-  async playTrack(track, newQueue = null) {
-    this.initWebAudio();
-    if (this.audioCtx && this.audioCtx.state === 'suspended') {
-      await this.audioCtx.resume();
+  /** Make a track current without starting playback (e.g. restoring the last session). */
+  load(track, queue = null) {
+    this.currentTrack = track;
+    if (queue) {
+      this.originalQueue = [...queue];
+      this.queue = [...queue];
+      this.queueIndex = Math.max(0, this.queue.findIndex(t => t.id === track.id));
     }
+    this.audio.src = track.audioUrl;
+    this._emit('trackchange', { track });
+    this._emit('queuechange', {});
+  }
 
+  /** Play a track; passing newQueue replaces the queue (re-applying the active shuffle mode). */
+  async playTrack(track, newQueue = null) {
+    this._resumeContext();
+
+    this.currentTrack = track;
     if (newQueue) {
       this.originalQueue = [...newQueue];
       this.queue = [...newQueue];
@@ -189,383 +154,244 @@ export class AudioService {
         this.queue.unshift(track);
         this.queueIndex = 0;
       }
-      this._emit('queuechange', { queue: this.queue, queueIndex: this.queueIndex });
+      if (this.shuffleMode === 'true-random') this._applyTrueRandomShuffle();
+      else if (this.shuffleMode === 'smart-flow') this._applySmartFlowShuffle();
+      this._emit('queuechange', {});
     }
 
-    this.currentTrack = track;
     this.audio.src = track.audioUrl;
     this.audio.playbackRate = this.playbackRate;
+    StorageService.recordPlay(track.id);
+    this._emit('trackchange', { track });
 
     try {
       await this.audio.play();
-      this.isPlaying = true;
-      StorageService.recordPlay(track.id);
-      this._emit('trackchange', { track: this.currentTrack, queueIndex: this.queueIndex });
     } catch (err) {
-      console.warn('Playback start postponed until user interacts:', err);
+      if (err.name !== 'AbortError') console.warn('Playback failed:', err);
     }
   }
 
-  /**
-   * Toggle Play / Pause
-   */
-  async togglePlayPause() {
-    this.initWebAudio();
-    if (this.audioCtx && this.audioCtx.state === 'suspended') {
-      await this.audioCtx.resume();
-    }
+  playFromQueue(index) {
+    const track = this.queue[index];
+    if (!track) return;
+    this.queueIndex = index;
+    this.playTrack(track);
+    this._emit('queuechange', {});
+  }
 
-    if (!this.currentTrack) {
-      if (this.queue.length > 0) {
-        return this.playTrack(this.queue[0]);
-      } else if (this.catalog.length > 0) {
-        return this.playTrack(this.catalog[0], this.catalog);
-      }
+  async togglePlayPause() {
+    if (!this.currentTrack || !this.audio.src) {
+      const track = this.currentTrack || this.queue[0] || this.catalog[0];
+      if (track) return this.playTrack(track, this.queue.length ? null : this.catalog);
       return;
     }
-
+    this._resumeContext();
     if (this.audio.paused) {
-      try {
-        await this.audio.play();
-        this.isPlaying = true;
-      } catch (e) {
-        console.warn('Failed to resume:', e);
-      }
+      try { await this.audio.play(); } catch (e) { console.warn('Failed to resume:', e); }
     } else {
       this.audio.pause();
-      this.isPlaying = false;
     }
-    this._emit('playstate', { isPlaying: this.isPlaying });
   }
 
-  /**
-   * Play next track
-   */
   playNext(manual = true) {
     if (this.queue.length === 0) return;
 
-    // Check if smart flow shuffle is active and queue is ending
+    // Smart Flow keeps the session going by appending recommendations at the end of the queue
     if (this.shuffleMode === 'smart-flow' && this.queueIndex >= this.queue.length - 1) {
-      // Intelligently inject 3 new recommendations at the end of queue
-      const dial = StorageService.getDiscoveryDial();
-      const recs = RecommendationEngine.getRecommendationsForTrack(this.currentTrack, this.catalog, dial, 3);
-      for (const item of recs) {
-        if (!this.queue.some(t => t.id === item.track.id)) {
-          this.queue.push(item.track);
-        }
+      const recs = RecommendationEngine.getRecommendationsForTrack(
+        this.currentTrack, this.catalog, StorageService.getDiscoveryDial(), 3
+      );
+      for (const { track } of recs) {
+        if (!this.queue.some(t => t.id === track.id)) this.queue.push(track);
       }
-      this._emit('queuechange', { queue: this.queue, queueIndex: this.queueIndex });
     }
 
-    let nextIndex = this.queueIndex + 1;
-    if (nextIndex >= this.queue.length) {
-      if (this.loopMode === 'all' || manual) {
-        nextIndex = 0;
-      } else {
+    let next = this.queueIndex + 1;
+    if (next >= this.queue.length) {
+      if (this.loopMode !== 'all' && !manual) {
         this.audio.pause();
-        this.isPlaying = false;
-        this._emit('playstate', { isPlaying: false });
+        this.audio.currentTime = 0;
         return;
       }
+      next = 0;
     }
-
-    this.queueIndex = nextIndex;
-    this.playTrack(this.queue[this.queueIndex]);
-    this._emit('queuechange', { queue: this.queue, queueIndex: this.queueIndex });
+    this.playFromQueue(next);
   }
 
-  /**
-   * Play previous track or restart current track
-   */
   playPrev() {
-    if (this.audio.currentTime > 3) {
+    if (this.audio.currentTime > 3 || this.queue.length === 0) {
       this.audio.currentTime = 0;
       return;
     }
-
-    if (this.queue.length === 0) return;
-
-    let prevIndex = this.queueIndex - 1;
-    if (prevIndex < 0) {
-      prevIndex = this.queue.length - 1;
-    }
-
-    this.queueIndex = prevIndex;
-    this.playTrack(this.queue[this.queueIndex]);
-    this._emit('queuechange', { queue: this.queue, queueIndex: this.queueIndex });
+    this.playFromQueue(this.queueIndex > 0 ? this.queueIndex - 1 : this.queue.length - 1);
   }
 
-  /**
-   * Seek to timestamp in seconds
-   */
   seekTo(seconds) {
-    if (Number.isFinite(seconds)) {
-      this.audio.currentTime = Math.max(0, Math.min(seconds, this.audio.duration || 0));
-    }
+    if (!Number.isFinite(seconds)) return;
+    const max = this.audio.duration || this.currentTrack?.duration || 0;
+    this.audio.currentTime = Math.max(0, Math.min(seconds, max));
   }
 
-  /**
-   * Set volume (0.0 to 1.0)
-   */
   setVolume(val) {
     this.volume = Math.max(0, Math.min(1, val));
     this.audio.volume = this.volume;
-    this.isMuted = this.volume === 0;
+    if (this.volume > 0 && this.isMuted) this.toggleMute();
     StorageService.saveVolume(this.volume);
   }
 
-  /**
-   * Toggle mute
-   */
   toggleMute() {
     this.isMuted = !this.isMuted;
     this.audio.muted = this.isMuted;
     return this.isMuted;
   }
 
-  /**
-   * Set playback speed (e.g. 0.75, 1.0, 1.25, 1.5, 2.0)
-   */
   setPlaybackSpeed(speed) {
     this.playbackRate = speed;
     this.audio.playbackRate = speed;
   }
 
-  /**
-   * Toggle Shuffle Mode:
-   * 'off' -> 'true-random' (Fisher-Yates pure randomness, no repeats) -> 'smart-flow' (AI harmonic flow) -> 'off'
-   */
+  /** off -> true-random -> smart-flow -> off */
   cycleShuffleMode() {
-    if (this.shuffleMode === 'off') {
-      this.shuffleMode = 'true-random';
-      this._applyTrueRandomShuffle();
-    } else if (this.shuffleMode === 'true-random') {
-      this.shuffleMode = 'smart-flow';
-      this._applySmartFlowShuffle();
-    } else {
-      this.shuffleMode = 'off';
-      this._restoreOriginalQueue();
-    }
-
-    this._emit('modechange', { shuffleMode: this.shuffleMode, loopMode: this.loopMode });
-    return this.shuffleMode;
+    const order = ['off', 'true-random', 'smart-flow'];
+    return this.setShuffleMode(order[(order.indexOf(this.shuffleMode) + 1) % order.length]);
   }
 
-  /**
-   * Directly set shuffle mode: 'off' | 'true-random' | 'smart-flow'
-   */
   setShuffleMode(mode) {
     this.shuffleMode = mode;
-    if (mode === 'true-random') {
-      this._applyTrueRandomShuffle();
-    } else if (mode === 'smart-flow') {
-      this._applySmartFlowShuffle();
-    } else {
-      this.shuffleMode = 'off';
-      this._restoreOriginalQueue();
-    }
+    if (mode === 'true-random') this._applyTrueRandomShuffle();
+    else if (mode === 'smart-flow') this._applySmartFlowShuffle();
+    else this._restoreOriginalQueue();
     this._emit('modechange', { shuffleMode: this.shuffleMode, loopMode: this.loopMode });
+    this._emit('queuechange', {});
     return this.shuffleMode;
   }
 
-  /**
-   * True Fisher-Yates random shuffle (Guarantees zero algorithmic bias & zero repeats!)
-   */
+  /** Fisher-Yates: every ordering equally likely, each track plays once per cycle. */
   _applyTrueRandomShuffle() {
     if (this.queue.length <= 1) return;
     const current = this.currentTrack;
     const others = this.queue.filter(t => t.id !== current?.id);
-
-    // Fisher-Yates algorithm
     for (let i = others.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [others[i], others[j]] = [others[j], others[i]];
     }
-
     this.queue = current ? [current, ...others] : others;
     this.queueIndex = 0;
-    this._emit('queuechange', { queue: this.queue, queueIndex: this.queueIndex });
   }
 
-  /**
-   * Smart Flow Shuffle: orders tracks by harmonic valence and tempo proximity
-   */
+  /** Greedy nearest-neighbour ordering by BPM and energy for smooth transitions. */
   _applySmartFlowShuffle() {
     if (this.queue.length <= 1) return;
     const current = this.currentTrack || this.queue[0];
     const pool = this.queue.filter(t => t.id !== current.id);
     const sorted = [current];
-
     let pivot = current;
     while (pool.length > 0) {
-      // Find closest track by BPM & energy
       let bestIdx = 0;
       let minDiff = Infinity;
-      for (let i = 0; i < pool.length; i++) {
-        const diff = Math.abs(pool[i].bpm - pivot.bpm) + (Math.abs(pool[i].vector.energy - pivot.vector.energy) * 50);
-        if (diff < minDiff) {
-          minDiff = diff;
-          bestIdx = i;
-        }
-      }
+      pool.forEach((t, i) => {
+        const diff = Math.abs(t.bpm - pivot.bpm) + Math.abs(t.vector.energy - pivot.vector.energy) * 50;
+        if (diff < minDiff) { minDiff = diff; bestIdx = i; }
+      });
       pivot = pool.splice(bestIdx, 1)[0];
       sorted.push(pivot);
     }
-
     this.queue = sorted;
     this.queueIndex = 0;
-    this._emit('queuechange', { queue: this.queue, queueIndex: this.queueIndex });
   }
 
   _restoreOriginalQueue() {
-    if (this.originalQueue.length > 0) {
-      this.queue = [...this.originalQueue];
-      if (this.currentTrack) {
-        this.queueIndex = this.queue.findIndex(t => t.id === this.currentTrack.id);
-      }
-      this._emit('queuechange', { queue: this.queue, queueIndex: this.queueIndex });
+    if (this.originalQueue.length === 0) return;
+    this.queue = [...this.originalQueue];
+    if (this.currentTrack) {
+      this.queueIndex = Math.max(0, this.queue.findIndex(t => t.id === this.currentTrack.id));
     }
   }
 
-  /**
-   * Toggle Loop Mode: 'off' -> 'all' -> 'one' -> 'off'
-   */
+  /** off -> all -> one -> off */
   cycleLoopMode() {
-    if (this.loopMode === 'all') {
-      this.loopMode = 'one';
-    } else if (this.loopMode === 'one') {
-      this.loopMode = 'off';
-    } else {
-      this.loopMode = 'all';
-    }
-
+    const order = ['off', 'all', 'one'];
+    this.loopMode = order[(order.indexOf(this.loopMode) + 1) % order.length];
     this._emit('modechange', { shuffleMode: this.shuffleMode, loopMode: this.loopMode });
     return this.loopMode;
   }
 
-  /**
-   * Queue Management Methods
-   */
   addToQueue(track, playNext = false) {
-    if (playNext && this.queueIndex >= 0) {
-      this.queue.splice(this.queueIndex + 1, 0, track);
-    } else {
-      this.queue.push(track);
-    }
-    this._emit('queuechange', { queue: this.queue, queueIndex: this.queueIndex });
+    if (playNext && this.queueIndex >= 0) this.queue.splice(this.queueIndex + 1, 0, track);
+    else this.queue.push(track);
+    this._emit('queuechange', {});
+  }
+
+  insertIntoQueue(index, track) {
+    this.queue.splice(index, 0, track);
+    if (index <= this.queueIndex) this.queueIndex++;
+    this._emit('queuechange', {});
   }
 
   removeFromQueue(index) {
-    if (index === this.queueIndex) return; // Cannot remove currently playing track
+    if (index === this.queueIndex) return;
     this.queue.splice(index, 1);
-    if (index < this.queueIndex) {
-      this.queueIndex--;
-    }
-    this._emit('queuechange', { queue: this.queue, queueIndex: this.queueIndex });
+    if (index < this.queueIndex) this.queueIndex--;
+    this._emit('queuechange', {});
   }
 
   reorderQueue(fromIdx, toIdx) {
     if (fromIdx < 0 || fromIdx >= this.queue.length || toIdx < 0 || toIdx >= this.queue.length) return;
     const [moved] = this.queue.splice(fromIdx, 1);
     this.queue.splice(toIdx, 0, moved);
-
-    if (this.currentTrack) {
-      this.queueIndex = this.queue.findIndex(t => t.id === this.currentTrack.id);
-    }
-    this._emit('queuechange', { queue: this.queue, queueIndex: this.queueIndex });
+    if (this.currentTrack) this.queueIndex = this.queue.findIndex(t => t.id === this.currentTrack.id);
+    this._emit('queuechange', {});
   }
 
-  clearQueue() {
-    if (this.currentTrack) {
-      this.queue = [this.currentTrack];
-      this.queueIndex = 0;
-    } else {
-      this.queue = [];
-      this.queueIndex = -1;
-    }
-    this._emit('queuechange', { queue: this.queue, queueIndex: this.queueIndex });
+  /** Drop everything after the current track. */
+  clearUpcoming() {
+    this.queue = this.queue.slice(0, this.queueIndex + 1);
+    this._emit('queuechange', {});
   }
 
-  /**
-   * Equalizer & Spatial controls
-   */
+  setQueue(queue, queueIndex) {
+    this.queue = queue;
+    this.queueIndex = queueIndex;
+    this._emit('queuechange', {});
+  }
+
   setEqBand(bandIndex, gainDb) {
     this.initWebAudio();
-    if (this.eqNodes[bandIndex]) {
-      this.eqNodes[bandIndex].gain.value = gainDb;
-      this.eqBands[bandIndex] = gainDb;
-      this.activePreset = 'custom';
-      this._saveEq();
-      this._emit('eqchange', { bands: this.eqBands, preset: this.activePreset });
-    }
+    this.eqBands[bandIndex] = gainDb;
+    if (this.eqNodes[bandIndex]) this.eqNodes[bandIndex].gain.value = gainDb;
+    this.activePreset = 'custom';
+    this._saveEq();
   }
 
   setEqPreset(presetKey) {
-    this.initWebAudio();
     const preset = EQ_PRESETS[presetKey];
     if (!preset) return;
-
+    this.initWebAudio();
     this.activePreset = presetKey;
     this.eqBands = [...preset.bands];
-
-    this.eqNodes.forEach((node, idx) => {
-      node.gain.value = this.eqBands[idx];
-    });
-
-    this._saveEq();
-    this._emit('eqchange', { bands: this.eqBands, preset: this.activePreset });
-  }
-
-  setSpatial3D(enabled) {
-    this.initWebAudio();
-    this.spatial3DEnabled = enabled;
-    if (this.pannerNode) {
-      // Simulate wide stereo ambiance by slight pan oscillation or subtle stereo expansion
-      this.pannerNode.pan.value = enabled ? 0.05 : 0;
-    }
+    this.eqNodes.forEach((node, i) => { node.gain.value = this.eqBands[i]; });
     this._saveEq();
   }
 
   _saveEq() {
-    StorageService.saveEqSettings({
-      preset: this.activePreset,
-      bands: this.eqBands,
-      spatial3D: this.spatial3DEnabled,
-      playbackSpeed: this.playbackRate
-    });
+    StorageService.saveEqSettings({ preset: this.activePreset, bands: this.eqBands });
   }
 
-  /**
-   * Get Real-Time Audio Data for Canvas Visualizer
-   */
   getFrequencyData(array) {
-    if (this.analyserNode) {
-      this.analyserNode.getByteFrequencyData(array);
-    } else {
-      array.fill(0);
-    }
+    if (this.analyserNode) this.analyserNode.getByteFrequencyData(array);
+    else array.fill(0);
   }
 
   getTimeDomainData(array) {
-    if (this.analyserNode) {
-      this.analyserNode.getByteTimeDomainData(array);
-    } else {
-      array.fill(128);
-    }
+    if (this.analyserNode) this.analyserNode.getByteTimeDomainData(array);
+    else array.fill(128);
   }
 
-  /**
-   * Event subscribe helper
-   */
   on(event, callback) {
-    if (this.listeners[event]) {
-      this.listeners[event].push(callback);
-    }
+    (this.listeners[event] ||= []).push(callback);
   }
 
   _emit(event, data) {
-    if (this.listeners[event]) {
-      this.listeners[event].forEach(fn => fn(data));
-    }
+    (this.listeners[event] || []).forEach(fn => fn(data));
   }
 }
